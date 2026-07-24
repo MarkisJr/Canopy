@@ -131,24 +131,43 @@
             <div class="score-grid" id="score-grid" aria-label="Budget summary"></div>
 
             <div class="dashboard-grid overview-primary-grid">
-              <section class="panel cycle-panel">
-                <div class="panel-heading">
-                  <div>
-                    <span class="eyebrow">Cycle pace</span>
-                    <h2>Where this pay is going</h2>
-                  </div>
-                  <span class="pill" id="cycle-days-left">—</span>
-                </div>
-                <div class="pace-visual">
-                  <div class="pace-ring" id="pace-ring">
+              <div class="overview-left-column">
+                <section class="panel cycle-panel">
+                  <div class="panel-heading">
                     <div>
-                      <strong id="safe-to-spend">$0</strong>
-                      <span>unallocated</span>
+                      <span class="eyebrow">Cycle pace</span>
+                      <h2>Where this pay is going</h2>
                     </div>
+                    <span class="pill" id="cycle-days-left">—</span>
                   </div>
-                  <div class="pace-legend" id="pace-legend"></div>
-                </div>
-              </section>
+                  <div class="pace-visual">
+                    <div class="pace-ring" id="pace-ring">
+                      <div>
+                        <strong id="safe-to-spend">$0</strong>
+                        <span>unallocated</span>
+                      </div>
+                    </div>
+                    <div class="pace-legend" id="pace-legend"></div>
+                  </div>
+                </section>
+
+                <section class="panel expense-buffer-panel" id="expense-buffer-panel">
+                  <div class="panel-heading expense-buffer-heading">
+                    <div>
+                      <span class="eyebrow">Expense buffer</span>
+                      <h2>Can this account cover what's left?</h2>
+                    </div>
+                    <label class="buffer-account-picker">
+                      <span>Account</span>
+                      <select
+                        id="expense-buffer-account"
+                        aria-label="Account to check against remaining expenses"
+                      ></select>
+                    </label>
+                  </div>
+                  <div id="expense-buffer-content"></div>
+                </section>
+              </div>
 
               <section class="panel upcoming-panel">
                 <div class="panel-heading">

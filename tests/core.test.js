@@ -590,6 +590,59 @@ assert.equal(
   "partially fulfilled items should follow pending items before fully matched activity",
 );
 
+progressPeriod.openingBalances.acct_bills = 300;
+const billsBuffer = core.expenseBufferSnapshot("acct_bills", progressPeriod, "2026-08-04");
+assert.deepEqual(
+  {
+    currentBalance: billsBuffer.currentBalance,
+    remainingExpected: billsBuffer.remainingExpected,
+    difference: billsBuffer.difference,
+    shortfall: billsBuffer.shortfall,
+    overdueRemaining: billsBuffer.overdueRemaining,
+    partialRemaining: billsBuffer.partialRemaining,
+  },
+  {
+    currentBalance: 300,
+    remainingExpected: 500,
+    difference: -200,
+    shortfall: 200,
+    overdueRemaining: 500,
+    partialRemaining: 0,
+  },
+  "the expense buffer should compare an account balance with only its unpaid planned expenses",
+);
+
+progressPeriod.openingBalances.acct_everyday = 75;
+const everydayBuffer = core.expenseBufferSnapshot(
+  "acct_everyday",
+  progressPeriod,
+  "2026-08-04",
+);
+assert.deepEqual(
+  {
+    remainingExpected: everydayBuffer.remainingExpected,
+    difference: everydayBuffer.difference,
+    buffer: everydayBuffer.buffer,
+    overdueRemaining: everydayBuffer.overdueRemaining,
+    partialRemaining: everydayBuffer.partialRemaining,
+  },
+  {
+    remainingExpected: 40,
+    difference: 35,
+    buffer: 35,
+    overdueRemaining: 40,
+    partialRemaining: 40,
+  },
+  "partial and overdue occurrences should contribute only their unpaid remainder",
+);
+
+progressState.settings.expenseBufferAccountId = "acct_everyday";
+assert.equal(
+  core.normalizeState(progressState).settings.expenseBufferAccountId,
+  "acct_everyday",
+  "a valid expense-buffer account choice should survive state normalisation",
+);
+
 const categoryState = core.initialState();
 const categoryPeriod = categoryState.periods[0];
 categoryPeriod.startDate = "2026-07-20";

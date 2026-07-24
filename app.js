@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.3.3";
+  const APP_VERSION = "0.3.4";
   const SCHEMA_VERSION = 3;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
@@ -152,6 +152,7 @@
         primaryIncomeId: "",
         theme: "power",
         sidebarCollapsed: false,
+        expenseBufferAccountId: "acct_bills",
       },
       accounts,
       categories,
@@ -193,6 +194,14 @@
       "periods",
     ]) {
       if (!Array.isArray(next[key])) next[key] = fresh[key];
+    }
+    if (
+      !next.accounts.some((account) => account.id === next.settings.expenseBufferAccountId)
+    ) {
+      const plannedAccountId = next.expenses.find((expense) =>
+        next.accounts.some((account) => account.id === expense.accountId),
+      )?.accountId;
+      next.settings.expenseBufferAccountId = plannedAccountId || next.accounts[0]?.id || "";
     }
     const fallbackCategory = next.categories.find(
       (category) => category.id === UNCATEGORISED_CATEGORY_ID,
@@ -731,6 +740,42 @@
       });
   }
 
+  function expenseBufferSnapshot(accountId, period = activePeriod(), today = localDate()) {
+    const remainingEntries = plannedOccurrenceProgress(period, today)
+      .filter((entry) => entry.type === "expense" && entry.item.accountId === accountId)
+      .map((entry) => ({
+        ...entry,
+        remaining: roundMoney(Math.max(0, entry.planned - entry.actual)),
+      }))
+      .filter((entry) => entry.remaining >= 0.005);
+    const remainingExpected = roundMoney(
+      remainingEntries.reduce((sum, entry) => sum + entry.remaining, 0),
+    );
+    const overdueEntries = remainingEntries.filter((entry) => entry.date < today);
+    const partialEntries = remainingEntries.filter((entry) => entry.status === "partial");
+    const currentBalance = accountById(accountId) ? accountBalance(accountId, period) : 0;
+    const difference = roundMoney(currentBalance - remainingExpected);
+
+    return {
+      accountId,
+      currentBalance,
+      remainingExpected,
+      difference,
+      shortfall: roundMoney(Math.max(0, -difference)),
+      buffer: roundMoney(Math.max(0, difference)),
+      remainingCount: remainingEntries.length,
+      overdueCount: overdueEntries.length,
+      overdueRemaining: roundMoney(
+        overdueEntries.reduce((sum, entry) => sum + entry.remaining, 0),
+      ),
+      partialCount: partialEntries.length,
+      partialRemaining: roundMoney(
+        partialEntries.reduce((sum, entry) => sum + entry.remaining, 0),
+      ),
+      remainingEntries,
+    };
+  }
+
   function reportingCategoryId(categoryId) {
     return categoryById(categoryId)?.id || UNCATEGORISED_CATEGORY_ID;
   }
@@ -1023,9 +1068,177 @@
       )
       .join("");
 
+    renderExpenseBuffer(period);
     renderUpcoming(period);
     renderDashboardAccounts(period);
     renderRecentTransactions(period);
+  }
+
+  function renderExpenseBuffer(period) {
+    const panel = $("#expense-buffer-panel");
+    const select = $("#expense-buffer-account");
+    const content = $("#expense-buffer-content");
+    if (!panel || !select || !content) return;
+
+    const selectedId = state.settings.expenseBufferAccountId;
+    const account = accountById(selectedId) || state.accounts[0] || null;
+    select.innerHTML = state.accounts.length
+      ? state.accounts
+          .map(
+            (item) =>
+              `<option value="${escapeHtml(item.id)}" ${
+                item.id === account?.id ? "selected" : ""
+              }>${escapeHtml(item.name)}</option>`,
+          )
+          .join("")
+      : '<option value="">No accounts</option>';
+    select.disabled = !account;
+
+    if (!account) {
+      panel.dataset.tone = "neutral";
+      content.innerHTML = emptyState(
+        "No account to check",
+        "Add an account and assign planned expenses to it to see an expense buffer.",
+        "○",
+      );
+      return;
+    }
+
+    const snapshot = expenseBufferSnapshot(account.id, period);
+    const isShort = snapshot.shortfall >= 0.005;
+    const isExact =
+      snapshot.remainingExpected >= 0.005 && Math.abs(snapshot.difference) < 0.005;
+    const tone = isShort ? "bad" : "good";
+    const plottedBalance = Math.max(0, snapshot.currentBalance);
+    const scaleMaximum = Math.max(plottedBalance, snapshot.remainingExpected, 1) * 1.12;
+    const barHeight = (amount) =>
+      amount >= 0.005 ? Math.max(3, Math.min(100, (amount / scaleMaximum) * 100)) : 0;
+    const balanceHeight = barHeight(plottedBalance);
+    const expensesHeight = barHeight(snapshot.remainingExpected);
+    const guideBottom = Math.min(balanceHeight, expensesHeight);
+    const guideHeight = Math.abs(balanceHeight - expensesHeight);
+    const gapAmount = Math.abs(snapshot.difference);
+    const showGuide = gapAmount >= 0.005;
+    const timingNotes = [];
+    if (snapshot.overdueRemaining >= 0.005) {
+      timingNotes.push(
+        `${money(snapshot.overdueRemaining)} across ${snapshot.overdueCount} overdue ${
+          snapshot.overdueCount === 1 ? "item" : "items"
+        }`,
+      );
+    }
+    if (snapshot.partialRemaining >= 0.005) {
+      timingNotes.push(
+        `${money(snapshot.partialRemaining)} still due on ${snapshot.partialCount} partially spent ${
+          snapshot.partialCount === 1 ? "item" : "items"
+        }`,
+      );
+    }
+
+    let headline;
+    let detail;
+    if (isShort) {
+      headline = `Transfer ${money(snapshot.shortfall)} into ${account.name}`;
+      detail = `${account.name} cannot yet cover the ${money(
+        snapshot.remainingExpected,
+      )} still expected this cycle.`;
+    } else if (snapshot.remainingExpected < 0.005) {
+      headline = `No planned expenses left for ${account.name}`;
+      detail = `${money(snapshot.currentBalance)} remains available in this account.`;
+    } else if (isExact) {
+      headline = `${account.name} is funded exactly`;
+      detail = `The current balance matches the expenses still expected this cycle.`;
+    } else {
+      headline = `${money(snapshot.buffer)} buffer after planned expenses`;
+      detail = `${account.name} should cover the ${money(
+        snapshot.remainingExpected,
+      )} still expected this cycle.`;
+    }
+
+    panel.dataset.tone = tone;
+    content.innerHTML = `
+      <div class="buffer-status tone-${tone}">
+        <span class="buffer-status-mark" aria-hidden="true">
+          ${
+            isShort
+              ? `<svg viewBox="0 0 24 24">
+                  <path d="M12 6.5v7"></path>
+                  <circle cx="12" cy="17.5" r="1"></circle>
+                </svg>`
+              : `<svg viewBox="0 0 24 24">
+                  <path d="m6.5 12.5 3.5 3.5 7.5-8"></path>
+                </svg>`
+          }
+        </span>
+        <div>
+          <strong>${escapeHtml(headline)}</strong>
+          <span>${escapeHtml(detail)}</span>
+          ${
+            timingNotes.length
+              ? `<small>${escapeHtml(`Includes ${timingNotes.join("; ")}.`)}</small>`
+              : ""
+          }
+        </div>
+      </div>
+      <div
+        class="buffer-chart tone-${tone}"
+        role="img"
+        aria-label="${escapeHtml(
+          `${account.name}: current balance ${money(
+            snapshot.currentBalance,
+          )}; remaining expected expenses ${money(
+            snapshot.remainingExpected,
+          )}; ${isShort ? "shortfall" : "buffer"} ${money(gapAmount)}.`,
+        )}"
+      >
+        <div class="buffer-bars-stage">
+          <span class="buffer-grid-line buffer-grid-line-top" aria-hidden="true"></span>
+          <span class="buffer-grid-line buffer-grid-line-middle" aria-hidden="true"></span>
+          <span class="buffer-grid-line buffer-grid-line-base" aria-hidden="true"></span>
+          ${
+            showGuide
+              ? `<span
+                  class="buffer-gap-guide ${guideHeight < 12 ? "is-compact" : ""}"
+                  style="--guide-bottom:${guideBottom}%;--guide-height:${guideHeight}%"
+                  aria-hidden="true"
+                ><strong>${escapeHtml(
+                  `${money(gapAmount)} ${isShort ? "short" : "spare"}`,
+                )}</strong></span>`
+              : ""
+          }
+          <div class="buffer-bar-column" style="--bar-height:${balanceHeight}%">
+            <span class="buffer-bar-value ${
+              snapshot.currentBalance < -0.005 ? "status-bad" : ""
+            }">${money(snapshot.currentBalance)}</span>
+            <i
+              class="buffer-bar-fill buffer-balance-bar ${
+                snapshot.currentBalance < -0.005 ? "is-negative" : ""
+              }"
+              aria-hidden="true"
+            ></i>
+          </div>
+          <div class="buffer-bar-column" style="--bar-height:${expensesHeight}%">
+            <span class="buffer-bar-value">${money(snapshot.remainingExpected)}</span>
+            <i
+              class="buffer-bar-fill buffer-expenses-bar"
+              aria-hidden="true"
+            ></i>
+          </div>
+        </div>
+        <div class="buffer-bar-labels" aria-hidden="true">
+          <span>Current balance</span>
+          <span>Expenses remaining</span>
+        </div>
+      </div>
+      <div class="buffer-facts">
+        <div><span>Available now</span><strong>${money(snapshot.currentBalance)}</strong></div>
+        <div><span>Still expected</span><strong>${money(
+          snapshot.remainingExpected,
+        )}</strong></div>
+        <div class="tone-${tone}"><span>${
+          isShort ? "Transfer needed" : "Expected buffer"
+        }</span><strong>${money(isShort ? snapshot.shortfall : snapshot.buffer)}</strong></div>
+      </div>`;
   }
 
   function renderUpcoming(period) {
@@ -3405,6 +3618,11 @@
     $("#global-add-transaction").addEventListener("click", () => openTransactionDialog());
     $("#page-add-transaction").addEventListener("click", () => openTransactionDialog());
     $("#archive-cycle-button").addEventListener("click", archiveActiveCycle);
+    $("#expense-buffer-account").addEventListener("change", (event) => {
+      mutate("", () => {
+        state.settings.expenseBufferAccountId = event.currentTarget.value;
+      });
+    });
 
     $("#theme-cycle").addEventListener("click", () => {
       const index = THEME_ORDER.indexOf(state.settings.theme);
@@ -3599,6 +3817,7 @@
       manageableCategories,
       reassignCategoryReferences,
       plannedOccurrenceProgress,
+      expenseBufferSnapshot,
       matchingPlan,
       addDays,
       addMonths,

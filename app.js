@@ -1,0 +1,3622 @@
+(function () {
+  "use strict";
+
+  const APP_VERSION = "0.3.3";
+  const SCHEMA_VERSION = 3;
+  const STORAGE_KEY = "canopy-budget-data-v1";
+  const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
+  const EXTERNAL_BACKUP_INTERVAL_MS = 48 * 60 * 60 * 1000;
+  const THEME_ORDER = ["power", "fern", "blush"];
+  const COLOURS = [
+    "#8eadcf",
+    "#75c7a0",
+    "#e3b76b",
+    "#d990b7",
+    "#a993d6",
+    "#e58383",
+    "#7cb7b9",
+    "#cf9a6b",
+  ];
+
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+  const uid = (prefix = "id") =>
+    `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function localDate(date = new Date()) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function parseDate(value) {
+    if (!value) return new Date();
+    const [year, month, day] = String(value).split("-").map(Number);
+    return new Date(year, month - 1, day, 12, 0, 0, 0);
+  }
+
+  function addDays(value, days) {
+    const date = parseDate(value);
+    date.setDate(date.getDate() + Number(days));
+    return localDate(date);
+  }
+
+  function addMonths(value, months) {
+    const date = parseDate(value);
+    const originalDay = date.getDate();
+    date.setDate(1);
+    date.setMonth(date.getMonth() + Number(months));
+    const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+    date.setDate(Math.min(originalDay, lastDay));
+    return localDate(date);
+  }
+
+  function addYears(value, years) {
+    const date = parseDate(value);
+    const month = date.getMonth();
+    date.setFullYear(date.getFullYear() + Number(years));
+    if (date.getMonth() !== month) date.setDate(0);
+    return localDate(date);
+  }
+
+  function daysBetween(start, end) {
+    return Math.round((parseDate(end) - parseDate(start)) / 86400000);
+  }
+
+  function formatDate(value, options = {}) {
+    if (!value) return "—";
+    return new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: options.month ?? "short",
+      year: options.year ?? "numeric",
+    }).format(parseDate(value));
+  }
+
+  function formatCompactDate(value) {
+    if (!value) return "—";
+    return new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+    }).format(parseDate(value));
+  }
+
+  function formatDuration(totalDays) {
+    const days = Math.max(0, Math.ceil(totalDays));
+    if (days < 45) return `${days} day${days === 1 ? "" : "s"}`;
+    if (days < 730) {
+      const months = Math.ceil(days / 30.4375);
+      return `${months} month${months === 1 ? "" : "s"}`;
+    }
+    const years = (days / 365.25).toFixed(1).replace(".0", "");
+    return `${years} years`;
+  }
+
+  function initialState() {
+    const start = localDate();
+    const createdAt = new Date().toISOString();
+    const categories = [
+      ["cat_housing", "Housing", "expense", "#a993d6"],
+      ["cat_bills", "Bills & subscriptions", "expense", "#8eadcf"],
+      ["cat_groceries", "Groceries", "expense", "#75c7a0"],
+      ["cat_transport", "Transport", "expense", "#e3b76b"],
+      ["cat_health", "Health", "expense", "#d990b7"],
+      ["cat_eating", "Eating out", "expense", "#cf9a6b"],
+      ["cat_fun", "Fun & hobbies", "expense", "#7cb7b9"],
+      ["cat_income", "Pay", "income", "#75c7a0"],
+      ["cat_other_income", "Other income", "income", "#8eadcf"],
+      [UNCATEGORISED_CATEGORY_ID, "Uncategorised", "both", "#6f7b88"],
+    ].map(([id, name, type, color]) => ({ id, name, type, color }));
+
+    const accounts = [
+      { id: "acct_everyday", name: "Everyday", kind: "transaction", color: "#8eadcf" },
+      { id: "acct_bills", name: "Bills", kind: "transaction", color: "#a993d6" },
+      { id: "acct_savings", name: "Savings", kind: "savings", color: "#75c7a0" },
+    ];
+
+    const activePeriod = {
+      id: uid("period"),
+      startDate: start,
+      endDate: addDays(start, 13),
+      status: "active",
+      openingBalances: Object.fromEntries(accounts.map((account) => [account.id, 0])),
+      createdAt,
+    };
+
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      metadata: {
+        appVersion: APP_VERSION,
+        createdAt,
+        lastOpenedDate: start,
+        lastSavedAt: null,
+        lastExternalBackupAt: null,
+        backupWindowStartedAt: createdAt,
+        activePeriodId: activePeriod.id,
+      },
+      settings: {
+        currency: "AUD",
+        payIntervalValue: 2,
+        payIntervalUnit: "weeks",
+        primaryIncomeId: "",
+        theme: "power",
+        sidebarCollapsed: false,
+      },
+      accounts,
+      categories,
+      incomeSources: [],
+      expenses: [],
+      transactions: [],
+      adjustments: [],
+      goals: [],
+      periods: [activePeriod],
+    };
+  }
+
+  function normalizeState(candidate) {
+    const fresh = initialState();
+    const next = candidate && typeof candidate === "object" ? candidate : fresh;
+    const candidateMetadata =
+      next.metadata && typeof next.metadata === "object" ? next.metadata : {};
+    next.schemaVersion = SCHEMA_VERSION;
+    next.metadata = {
+      ...fresh.metadata,
+      ...candidateMetadata,
+      appVersion: APP_VERSION,
+      lastExternalBackupAt: candidateMetadata.lastExternalBackupAt || null,
+      backupWindowStartedAt:
+        candidateMetadata.backupWindowStartedAt ||
+        candidateMetadata.createdAt ||
+        candidateMetadata.lastSavedAt ||
+        fresh.metadata.backupWindowStartedAt,
+    };
+    next.settings = { ...fresh.settings, ...(next.settings || {}) };
+    for (const key of [
+      "accounts",
+      "categories",
+      "incomeSources",
+      "expenses",
+      "transactions",
+      "adjustments",
+      "goals",
+      "periods",
+    ]) {
+      if (!Array.isArray(next[key])) next[key] = fresh[key];
+    }
+    const fallbackCategory = next.categories.find(
+      (category) => category.id === UNCATEGORISED_CATEGORY_ID,
+    );
+    if (fallbackCategory) {
+      fallbackCategory.name = "Uncategorised";
+      fallbackCategory.type = "both";
+    } else {
+      next.categories.push(
+        clone(
+          fresh.categories.find((category) => category.id === UNCATEGORISED_CATEGORY_ID),
+        ),
+      );
+    }
+    delete next.backups;
+    next.transactions.forEach((transaction) => {
+      if (typeof transaction.goalId !== "string") transaction.goalId = "";
+      if (typeof transaction.toAccountId !== "string") transaction.toAccountId = "";
+    });
+    next.goals.forEach((goal) => {
+      goal.currentAmount = roundMoney(Number(goal.currentAmount) || 0);
+      goal.startingAmount = roundMoney(Number(goal.startingAmount ?? goal.currentAmount) || 0);
+    });
+    if (!next.periods.some((period) => period.id === next.metadata.activePeriodId)) {
+      const period = fresh.periods[0];
+      period.openingBalances = Object.fromEntries(next.accounts.map((account) => [account.id, 0]));
+      next.periods.push(period);
+      next.metadata.activePeriodId = period.id;
+    }
+    return next;
+  }
+
+  function loadState() {
+    if (typeof localStorage === "undefined") return initialState();
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? normalizeState(JSON.parse(raw)) : initialState();
+    } catch (error) {
+      console.warn("Could not read local data.", error);
+      return initialState();
+    }
+  }
+
+  let state = loadState();
+  let currentView = "dashboard";
+  let currentPlanTab = "expenses";
+  let selectedGoalId = state.goals[0]?.id || null;
+  let backupGateActive = false;
+  let backupCheckTimer = null;
+
+  function activePeriod() {
+    return (
+      state.periods.find((period) => period.id === state.metadata.activePeriodId) ||
+      state.periods.find((period) => period.status === "active") ||
+      state.periods[0]
+    );
+  }
+
+  function payIntervalDays() {
+    const value = Math.max(1, Number(state.settings.payIntervalValue) || 1);
+    return state.settings.payIntervalUnit === "weeks" ? value * 7 : value;
+  }
+
+  function lastExternalBackupTime() {
+    return Date.parse(state.metadata.lastExternalBackupAt || "");
+  }
+
+  function backupDueAt() {
+    const lastBackup = lastExternalBackupTime();
+    const windowStarted = Date.parse(state.metadata.backupWindowStartedAt || "");
+    const anchor = Number.isFinite(lastBackup) ? lastBackup : windowStarted;
+    return Number.isFinite(anchor) ? anchor + EXTERNAL_BACKUP_INTERVAL_MS : 0;
+  }
+
+  function backupIsOverdue(now = Date.now()) {
+    const dueAt = backupDueAt();
+    return !dueAt || Number(now) >= dueAt;
+  }
+
+  function backupFilename(date = localDate(), period = activePeriod()) {
+    const start = period?.startDate || "unknown-start";
+    const end = period?.endDate || "unknown-end";
+    return `canopy-backup_${date}_pay-period_${start}_to_${end}.json`;
+  }
+
+  function persistState() {
+    state.metadata.lastSavedAt = new Date().toISOString();
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (error) {
+      toast("This browser could not save the latest change.", "error");
+      console.error(error);
+    }
+  }
+
+  function mutate(message, callback) {
+    callback();
+    state = normalizeState(state);
+    persistState();
+    renderAll();
+    if (message) toast(message);
+  }
+
+  function toast(message, type = "success") {
+    const region = $("#toast-region");
+    const item = document.createElement("div");
+    item.className = `toast ${type === "error" ? "error" : ""}`;
+    item.textContent = message;
+    region.append(item);
+    setTimeout(() => item.remove(), 3600);
+  }
+
+  function money(value, options = {}) {
+    const amount = Number(value) || 0;
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: state.settings.currency || "AUD",
+      minimumFractionDigits: options.cents === false ? 0 : 2,
+      maximumFractionDigits: options.cents === false ? 0 : 2,
+      signDisplay: options.sign ? "always" : "auto",
+    }).format(amount);
+  }
+
+  function accountById(id) {
+    return state.accounts.find((item) => item.id === id);
+  }
+
+  function categoryById(id) {
+    return state.categories.find((item) => item.id === id);
+  }
+
+  function expenseById(id) {
+    return state.expenses.find((item) => item.id === id);
+  }
+
+  function incomeById(id) {
+    return state.incomeSources.find((item) => item.id === id);
+  }
+
+  function goalById(id) {
+    return state.goals.find((item) => item.id === id);
+  }
+
+  function itemSchedule(item) {
+    return {
+      mode: item.schedule?.mode || "recurring",
+      interval: Math.max(1, Number(item.schedule?.interval) || 1),
+      unit: item.schedule?.unit || "months",
+      anchorDate: item.schedule?.anchorDate || localDate(),
+      expectedDates: Array.isArray(item.schedule?.expectedDates)
+        ? item.schedule.expectedDates
+        : [],
+    };
+  }
+
+  function scheduleOccurrences(item, startDate, endDate) {
+    if (item.active === false) return [];
+    const schedule = itemSchedule(item);
+    if (schedule.mode === "irregular") {
+      return schedule.expectedDates
+        .filter((entry) => entry?.date >= startDate && entry?.date <= endDate)
+        .map((entry) => ({
+          date: entry.date,
+          amount: Number(entry.amount ?? item.amount) || 0,
+        }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    }
+
+    const occurrences = [];
+    const anchor = schedule.anchorDate;
+    let cursor = anchor;
+    let stepIndex = 0;
+    const step = () => {
+      stepIndex += 1;
+      if (schedule.unit === "days") cursor = addDays(anchor, schedule.interval * stepIndex);
+      else if (schedule.unit === "weeks") cursor = addDays(anchor, schedule.interval * 7 * stepIndex);
+      else if (schedule.unit === "years") cursor = addYears(anchor, schedule.interval * stepIndex);
+      else cursor = addMonths(anchor, schedule.interval * stepIndex);
+    };
+
+    let guard = 0;
+    while (cursor < startDate && guard < 10000) {
+      step();
+      guard += 1;
+    }
+    while (cursor <= endDate && guard < 10000) {
+      occurrences.push({ date: cursor, amount: Number(item.amount) || 0 });
+      step();
+      guard += 1;
+    }
+    return occurrences;
+  }
+
+  function scheduleText(item) {
+    const schedule = itemSchedule(item);
+    if (schedule.mode === "irregular") {
+      const count = schedule.expectedDates.length;
+      return `${count} expected date${count === 1 ? "" : "s"}`;
+    }
+    const unit = schedule.unit.replace(/s$/, "");
+    return schedule.interval === 1 ? `Every ${unit}` : `Every ${schedule.interval} ${schedule.unit}`;
+  }
+
+  function periodTransactions(period = activePeriod()) {
+    return state.transactions.filter((transaction) => transaction.periodId === period.id);
+  }
+
+  function transactionEffect(transaction, accountId) {
+    const amount = Number(transaction.amount) || 0;
+    if (transaction.type === "expense") return transaction.accountId === accountId ? -amount : 0;
+    if (transaction.type === "refund" || transaction.type === "income") {
+      return transaction.accountId === accountId ? amount : 0;
+    }
+    if (transaction.type === "transfer") {
+      if (transaction.accountId === accountId) return -amount;
+      if (transaction.toAccountId === accountId) return amount;
+    }
+    return 0;
+  }
+
+  function isSavingsAccount(accountId) {
+    return accountById(accountId)?.kind === "savings";
+  }
+
+  function inferTransferDirection(transaction) {
+    if (transaction?.type !== "transfer") return "not-transfer";
+    const fromSavings = isSavingsAccount(transaction.accountId);
+    const toSavings = isSavingsAccount(transaction.toAccountId);
+    if (!fromSavings && toSavings) return "savings-in";
+    if (fromSavings && !toSavings) return "savings-out";
+    return "account-transfer";
+  }
+
+  function transferDirection(transaction) {
+    if (transaction?.type !== "transfer") return "not-transfer";
+    return ["savings-in", "savings-out", "account-transfer"].includes(transaction.transferNature)
+      ? transaction.transferNature
+      : inferTransferDirection(transaction);
+  }
+
+  function transferStats(transactions = []) {
+    const stats = {
+      totalCount: 0,
+      intoSavings: 0,
+      intoCount: 0,
+      outOfSavings: 0,
+      outCount: 0,
+      otherTransfers: 0,
+      otherCount: 0,
+      netSavings: 0,
+    };
+    transactions
+      .filter((transaction) => transaction.type === "transfer")
+      .forEach((transaction) => {
+        const amount = Number(transaction.amount) || 0;
+        const direction = transferDirection(transaction);
+        stats.totalCount += 1;
+        if (direction === "savings-in") {
+          stats.intoSavings = roundMoney(stats.intoSavings + amount);
+          stats.intoCount += 1;
+        } else if (direction === "savings-out") {
+          stats.outOfSavings = roundMoney(stats.outOfSavings + amount);
+          stats.outCount += 1;
+        } else {
+          stats.otherTransfers = roundMoney(stats.otherTransfers + amount);
+          stats.otherCount += 1;
+        }
+      });
+    stats.netSavings = roundMoney(stats.intoSavings - stats.outOfSavings);
+    return stats;
+  }
+
+  function inferGoalTransferEffect(transaction) {
+    if (transaction?.type !== "transfer" || !transaction.goalId) return 0;
+    const goal = goalById(transaction.goalId);
+    if (!goal) return 0;
+    const amount = Number(transaction.amount) || 0;
+    if (goal.accountId) {
+      if (transaction.toAccountId === goal.accountId) return amount;
+      if (transaction.accountId === goal.accountId) return -amount;
+      return 0;
+    }
+    const direction = transferDirection(transaction);
+    if (direction === "savings-in") return amount;
+    if (direction === "savings-out") return -amount;
+    return 0;
+  }
+
+  function goalTransferEffect(transaction) {
+    if (transaction?.type !== "transfer" || !transaction.goalId) return 0;
+    const storedEffect = Number(transaction.goalContribution);
+    return Number.isFinite(storedEffect) ? storedEffect : inferGoalTransferEffect(transaction);
+  }
+
+  function applyGoalTransferChange(previousTransaction, nextTransaction) {
+    const changes = new Map();
+    for (const [transaction, multiplier] of [
+      [previousTransaction, -1],
+      [nextTransaction, 1],
+    ]) {
+      if (!transaction?.goalId) continue;
+      const effect = goalTransferEffect(transaction) * multiplier;
+      changes.set(transaction.goalId, roundMoney((changes.get(transaction.goalId) || 0) + effect));
+    }
+    changes.forEach((amount, goalId) => {
+      const goal = goalById(goalId);
+      if (!goal || Math.abs(amount) < 0.005) return;
+      goal.currentAmount = roundMoney(Math.max(0, Number(goal.currentAmount || 0) + amount));
+      goal.updatedAt = new Date().toISOString();
+    });
+  }
+
+  function validateGoalTransfer(transaction) {
+    if (transaction.type !== "transfer" || !transaction.goalId) return "";
+    const goal = goalById(transaction.goalId);
+    if (!goal) return "Choose an existing savings goal.";
+    if (goal.accountId) {
+      if (![transaction.accountId, transaction.toAccountId].includes(goal.accountId)) {
+        return `A transfer linked to “${goal.name}” must move into or out of its associated account.`;
+      }
+      return "";
+    }
+    if (inferGoalTransferEffect(transaction) === 0) {
+      return `A transfer linked to “${goal.name}” needs one savings account.`;
+    }
+    return "";
+  }
+
+  function accountBalance(accountId, period = activePeriod()) {
+    const opening = Number(period.openingBalances?.[accountId]) || 0;
+    const transactionDelta = periodTransactions(period).reduce(
+      (sum, transaction) => sum + transactionEffect(transaction, accountId),
+      0,
+    );
+    const adjustmentDelta = state.adjustments
+      .filter(
+        (adjustment) =>
+          adjustment.periodId === period.id &&
+          adjustment.accountId === accountId &&
+          adjustment.resolved !== true,
+      )
+      .reduce((sum, adjustment) => sum + Number(adjustment.delta || 0), 0);
+    return roundMoney(opening + transactionDelta + adjustmentDelta);
+  }
+
+  function unresolvedAdjustment(accountId, period = activePeriod()) {
+    return state.adjustments
+      .filter(
+        (adjustment) =>
+          adjustment.periodId === period.id &&
+          adjustment.accountId === accountId &&
+          adjustment.resolved !== true,
+      )
+      .reduce((sum, adjustment) => sum + Number(adjustment.delta || 0), 0);
+  }
+
+  function recordBalanceDifference(details, period = activePeriod()) {
+    const accountId = String(details?.accountId || "");
+    const account = accountById(accountId);
+    const reported = roundMoney(details?.reportedBalance);
+    if (!account || !Number.isFinite(reported)) {
+      return { status: "invalid", expected: null, reported };
+    }
+
+    const expected = accountBalance(accountId, period);
+    const delta = roundMoney(reported - expected);
+    if (Math.abs(delta) < 0.005) {
+      return { status: "matches", expected, reported, delta: 0 };
+    }
+
+    const note = String(details?.note || "").trim();
+    const recordedAt = new Date().toISOString();
+    const reusable = state.adjustments
+      .slice()
+      .reverse()
+      .find(
+        (adjustment) =>
+          adjustment.periodId === period.id &&
+          adjustment.accountId === accountId &&
+          adjustment.resolved === true &&
+          Math.abs(roundMoney(adjustment.reportedBalance) - reported) < 0.005 &&
+          String(adjustment.note || "").trim() === note,
+      );
+    const values = {
+      periodId: period.id,
+      accountId,
+      date: String(details?.date || localDate()),
+      expectedBalance: expected,
+      reportedBalance: reported,
+      delta,
+      note,
+      resolved: false,
+    };
+
+    if (reusable) {
+      if (reusable.resolvedAt) {
+        reusable.resolutionHistory = [
+          ...(Array.isArray(reusable.resolutionHistory) ? reusable.resolutionHistory : []),
+          reusable.resolvedAt,
+        ];
+      }
+      Object.assign(reusable, values, { reopenedAt: recordedAt });
+      delete reusable.resolvedAt;
+      return { status: "restored", adjustment: reusable, expected, reported, delta };
+    }
+
+    const adjustment = {
+      id: uid("adjustment"),
+      ...values,
+      createdAt: recordedAt,
+    };
+    state.adjustments.push(adjustment);
+    return { status: "created", adjustment, expected, reported, delta };
+  }
+
+  function transactionAllocations(transaction) {
+    if (!["expense", "refund"].includes(transaction.type)) return [];
+    const sign = transaction.type === "refund" ? -1 : 1;
+    if (Array.isArray(transaction.splits) && transaction.splits.length) {
+      return transaction.splits.map((split) => ({
+        categoryId: split.categoryId || UNCATEGORISED_CATEGORY_ID,
+        linkedPlanId: split.linkedPlanId || "",
+        amount: sign * (Number(split.amount) || 0),
+      }));
+    }
+    return [
+      {
+        categoryId: transaction.categoryId || UNCATEGORISED_CATEGORY_ID,
+        linkedPlanId: transaction.linkedPlanId || "",
+        amount: sign * (Number(transaction.amount) || 0),
+      },
+    ];
+  }
+
+  function plannedOccurrenceProgress(period = activePeriod(), today = localDate()) {
+    const entries = [
+      ...state.expenses.flatMap((item) =>
+        scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
+          ...occurrence,
+          item,
+          type: "expense",
+          actual: 0,
+        })),
+      ),
+      ...state.incomeSources.flatMap((item) =>
+        scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
+          ...occurrence,
+          item,
+          type: "income",
+          actual: 0,
+        })),
+      ),
+    ];
+    const entriesByPlan = new Map();
+    entries.forEach((entry) => {
+      const key = `${entry.type}:${entry.item.id}`;
+      if (!entriesByPlan.has(key)) entriesByPlan.set(key, []);
+      entriesByPlan.get(key).push(entry);
+    });
+    entriesByPlan.forEach((planEntries) => {
+      planEntries.sort((a, b) => a.date.localeCompare(b.date));
+    });
+
+    const assignContribution = (type, itemId, date, amount) => {
+      if (!itemId || Math.abs(Number(amount) || 0) < 0.005) return;
+      const candidates = entriesByPlan.get(`${type}:${itemId}`) || [];
+      if (!candidates.length) return;
+      const target = candidates.reduce((closest, candidate) => {
+        const candidateDistance = Math.abs(daysBetween(candidate.date, date));
+        const closestDistance = Math.abs(daysBetween(closest.date, date));
+        return candidateDistance < closestDistance ? candidate : closest;
+      });
+      target.actual = roundMoney(target.actual + Number(amount || 0));
+    };
+
+    periodTransactions(period).forEach((transaction) => {
+      if (transaction.type === "income") {
+        assignContribution(
+          "income",
+          transaction.linkedPlanId,
+          transaction.date,
+          Number(transaction.amount) || 0,
+        );
+        return;
+      }
+      transactionAllocations(transaction).forEach((allocation) => {
+        assignContribution(
+          "expense",
+          allocation.linkedPlanId,
+          transaction.date,
+          allocation.amount,
+        );
+      });
+    });
+
+    return entries
+      .map((entry) => {
+        const planned = roundMoney(entry.amount);
+        const actual = Math.max(0, roundMoney(entry.actual));
+        const difference = roundMoney(actual - planned);
+        let status = "pending";
+        if (actual >= 0.005) {
+          if (actual < planned - 0.005) status = "partial";
+          else if (Math.abs(difference) < 0.005) status = "exact";
+          else status = "over";
+        }
+        const overdue = status === "pending" && entry.date < today;
+        const tone =
+          overdue || (status === "over" && entry.type === "expense")
+            ? "bad"
+            : status === "partial"
+              ? "warn"
+              : ["exact", "over"].includes(status)
+                ? "good"
+                : "neutral";
+        return {
+          ...entry,
+          planned,
+          actual,
+          difference,
+          status,
+          overdue,
+          tone,
+        };
+      })
+      .sort((a, b) => {
+        const aGroup = a.status === "pending" ? 0 : 1;
+        const bGroup = b.status === "pending" ? 0 : 1;
+        if (aGroup !== bGroup) return aGroup - bGroup;
+        if (aGroup === 1) {
+          const statusOrder = { partial: 0, over: 1, exact: 2 };
+          const statusDifference = statusOrder[a.status] - statusOrder[b.status];
+          if (statusDifference) return statusDifference;
+        }
+        return a.date.localeCompare(b.date) || a.item.name.localeCompare(b.item.name);
+      });
+  }
+
+  function reportingCategoryId(categoryId) {
+    return categoryById(categoryId)?.id || UNCATEGORISED_CATEGORY_ID;
+  }
+
+  function categoryTotalsForPeriod(period = activePeriod()) {
+    const totals = new Map();
+    periodTransactions(period).forEach((transaction) => {
+      transactionAllocations(transaction).forEach((allocation) => {
+        const categoryId = reportingCategoryId(allocation.categoryId);
+        totals.set(categoryId, roundMoney((totals.get(categoryId) || 0) + allocation.amount));
+      });
+    });
+    return totals;
+  }
+
+  function uncategorisedActivity(period = activePeriod()) {
+    const transactions = new Set();
+    let spending = 0;
+    let income = 0;
+    periodTransactions(period).forEach((transaction) => {
+      if (["expense", "refund"].includes(transaction.type)) {
+        transactionAllocations(transaction).forEach((allocation) => {
+          if (reportingCategoryId(allocation.categoryId) === UNCATEGORISED_CATEGORY_ID) {
+            transactions.add(transaction);
+            spending = roundMoney(spending + allocation.amount);
+          }
+        });
+      } else if (
+        transaction.type === "income" &&
+        reportingCategoryId(transaction.categoryId) === UNCATEGORISED_CATEGORY_ID
+      ) {
+        transactions.add(transaction);
+        income = roundMoney(income + Number(transaction.amount || 0));
+      }
+    });
+    return { count: transactions.size, spending, income };
+  }
+
+  function renderUncategorisedAlert(selector, period = activePeriod()) {
+    const element = $(selector);
+    const activity = uncategorisedActivity(period);
+    element.hidden = activity.count === 0;
+    if (!activity.count) {
+      element.innerHTML = "";
+      return;
+    }
+    const amounts = [];
+    if (Math.abs(activity.spending) >= 0.005) {
+      amounts.push(
+        activity.spending >= 0
+          ? `${money(activity.spending)} spending`
+          : `${money(Math.abs(activity.spending))} net refunds`,
+      );
+    }
+    if (Math.abs(activity.income) >= 0.005) amounts.push(`${money(activity.income)} income`);
+    element.innerHTML = `
+      <div>
+        <span class="eyebrow">Needs a category</span>
+        <strong>${activity.count} uncategorised entr${
+          activity.count === 1 ? "y" : "ies"
+        } this cycle</strong>
+        <p>${
+          amounts.length
+            ? `${escapeHtml(amounts.join(" and "))} can still be assigned for clearer insights.`
+            : "Assign these entries for clearer insights."
+        }</p>
+      </div>
+      <button class="text-button" type="button" data-go-view="transactions">Review transactions</button>`;
+  }
+
+  function summaryForPeriod(period = activePeriod()) {
+    if (period.status === "archived" && period.archiveSummary) return clone(period.archiveSummary);
+
+    const budgetIncome = state.incomeSources.reduce(
+      (sum, item) =>
+        sum +
+        scheduleOccurrences(item, period.startDate, period.endDate).reduce(
+          (subtotal, occurrence) => subtotal + occurrence.amount,
+          0,
+        ),
+      0,
+    );
+    const budgetExpenses = state.expenses.reduce(
+      (sum, item) =>
+        sum +
+        scheduleOccurrences(item, period.startDate, period.endDate).reduce(
+          (subtotal, occurrence) => subtotal + occurrence.amount,
+          0,
+        ),
+      0,
+    );
+    const transactions = periodTransactions(period);
+    const actualIncome = transactions
+      .filter((transaction) => transaction.type === "income")
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    const actualExpenses = transactions
+      .filter((transaction) => transaction.type === "expense")
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    const refunds = transactions
+      .filter((transaction) => transaction.type === "refund")
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    const netActualExpenses = actualExpenses - refunds;
+
+    return {
+      budgetIncome: roundMoney(budgetIncome),
+      actualIncome: roundMoney(actualIncome),
+      incomeDifference: roundMoney(actualIncome - budgetIncome),
+      budgetExpenses: roundMoney(budgetExpenses),
+      actualExpenses: roundMoney(netActualExpenses),
+      expenseDifference: roundMoney(budgetExpenses - netActualExpenses),
+      budgetNet: roundMoney(budgetIncome - budgetExpenses),
+      actualNet: roundMoney(actualIncome - netActualExpenses),
+      netDifference: roundMoney(actualIncome - netActualExpenses - (budgetIncome - budgetExpenses)),
+    };
+  }
+
+  function varianceStatus(difference, reference) {
+    const tolerance = Math.max(5, Math.abs(Number(reference) || 0) * 0.05);
+    if (difference > tolerance) return "good";
+    if (difference < -tolerance) return "bad";
+    return "warn";
+  }
+
+  function matchingPlan(description, type = "expense") {
+    const text = String(description || "").trim().toLowerCase();
+    if (!text) return null;
+    const collection = type === "income" ? state.incomeSources : state.expenses;
+    const candidates = collection
+      .flatMap((item) => {
+        const words = [
+          item.name,
+          ...(Array.isArray(item.keywords) ? item.keywords : String(item.keywords || "").split(",")),
+        ]
+          .map((word) => String(word || "").trim().toLowerCase())
+          .filter(Boolean);
+        return words.map((word) => ({ item, word }));
+      })
+      .filter((candidate) => text.includes(candidate.word))
+      .sort((a, b) => b.word.length - a.word.length);
+    return candidates[0]?.item || null;
+  }
+
+  function themeCss(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function renderAll() {
+    applyTheme(state.settings.theme);
+    applySidebarState();
+    renderPeriodHeader();
+    renderDashboard();
+    renderTransactions();
+    renderPlan();
+    renderGoals();
+    renderArchive();
+    renderSettings();
+    if (currentView === "insights") renderInsights();
+  }
+
+  function applyTheme(theme) {
+    const valid = THEME_ORDER.includes(theme) ? theme : "power";
+    document.documentElement.dataset.theme = valid;
+    $$("[data-theme-choice]").forEach((button) => {
+      button.classList.toggle("is-selected", button.dataset.themeChoice === valid);
+    });
+  }
+
+  function applySidebarState() {
+    const collapsed = state.settings.sidebarCollapsed === true;
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    const button = $("#sidebar-collapse");
+    if (!button) return;
+    const action = collapsed ? "Expand" : "Collapse";
+    button.setAttribute("aria-label", `${action} navigation`);
+    button.setAttribute("aria-expanded", String(!collapsed));
+    button.title = `${action} navigation`;
+    $(".nav-label", button).textContent = action;
+  }
+
+  function renderPeriodHeader() {
+    const period = activePeriod();
+    $("#period-label").textContent = `${formatCompactDate(period.startDate)} – ${formatDate(
+      period.endDate,
+      { month: "short", year: "numeric" },
+    )}`;
+  }
+
+  function emptyState(title, copy, icon = "○") {
+    return `<div class="empty-state"><span class="empty-icon">${icon}</span><h2>${escapeHtml(
+      title,
+    )}</h2><p>${escapeHtml(copy)}</p></div>`;
+  }
+
+  function renderDashboard() {
+    const period = activePeriod();
+    const summary = summaryForPeriod(period);
+    const today = localDate();
+    const hasPlan = state.expenses.length > 0 || state.incomeSources.length > 0;
+    $("#onboarding-banner").hidden = hasPlan;
+    renderUncategorisedAlert("#dashboard-uncategorised-alert", period);
+    $("#dashboard-eyebrow").textContent = new Intl.DateTimeFormat(undefined, {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+    }).format(new Date());
+
+    const primary = incomeById(state.settings.primaryIncomeId);
+    $("#dashboard-greeting").textContent = primary
+      ? `${primary.name} cycle, clearly mapped`
+      : "Your money at a glance";
+    $("#dashboard-subtitle").textContent =
+      today > period.endDate
+        ? "This cycle has ended. Review the numbers, then archive it when you are ready."
+        : "See what is due, what has moved, and what is still yours.";
+
+    const cards = [
+      {
+        label: "Income",
+        actual: summary.actualIncome,
+        budget: summary.budgetIncome,
+        difference: summary.incomeDifference,
+        status: varianceStatus(summary.incomeDifference, summary.budgetIncome),
+      },
+      {
+        label: "Expenses",
+        actual: summary.actualExpenses,
+        budget: summary.budgetExpenses,
+        difference: summary.expenseDifference,
+        status: varianceStatus(summary.expenseDifference, summary.budgetExpenses),
+      },
+      {
+        label: "Net",
+        actual: summary.actualNet,
+        budget: summary.budgetNet,
+        difference: summary.netDifference,
+        status: varianceStatus(summary.netDifference, summary.budgetNet),
+      },
+    ];
+    $("#score-grid").innerHTML = cards
+      .map(
+        (card) => `
+          <article class="score-card ${card.status}">
+            <span class="label">${card.label}</span>
+            <strong class="score-value">${money(card.actual)}</strong>
+            <div class="score-comparison">
+              <div><span>Budgeted</span><strong>${money(card.budget)}</strong></div>
+              <div><span>Difference</span><strong>${money(card.difference, { sign: true })}</strong></div>
+            </div>
+          </article>`,
+      )
+      .join("");
+
+    const daysLeft = daysBetween(today, period.endDate);
+    $("#cycle-days-left").textContent =
+      daysLeft < 0
+        ? "Cycle ended"
+        : daysLeft === 0
+          ? "Ends today"
+          : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`;
+    const expenseRatio =
+      summary.budgetExpenses > 0
+        ? Math.max(0, Math.min(1, summary.actualExpenses / summary.budgetExpenses))
+        : 0;
+    const remainingPlanned = Math.max(0, summary.budgetExpenses - summary.actualExpenses);
+    const savingsMovement = transferStats(periodTransactions(period)).netSavings;
+    const unallocated = roundMoney(
+      summary.actualIncome - summary.actualExpenses - remainingPlanned - savingsMovement,
+    );
+    $("#safe-to-spend").textContent = money(unallocated);
+    $("#safe-to-spend").className = unallocated < 0 ? "status-bad" : "";
+    $("#pace-ring").style.setProperty("--progress", `${expenseRatio * 360}deg`);
+    const paceLegend = [
+      ["var(--bad)", "Spent", summary.actualExpenses],
+      ["var(--warn)", "Still planned", remainingPlanned],
+      ["var(--good)", "Net so far", summary.actualNet],
+    ];
+    if (Math.abs(savingsMovement) >= 0.005) {
+      paceLegend.push([
+        savingsMovement >= 0 ? "var(--good)" : "var(--warn)",
+        savingsMovement >= 0 ? "Moved to savings" : "Pulled from savings",
+        Math.abs(savingsMovement),
+      ]);
+    }
+    $("#pace-legend").innerHTML = paceLegend
+      .map(
+        ([colour, label, amount]) =>
+          `<div class="legend-row"><i style="background:${colour}"></i><span>${label}</span><strong>${money(
+            amount,
+          )}</strong></div>`,
+      )
+      .join("");
+
+    renderUpcoming(period);
+    renderDashboardAccounts(period);
+    renderRecentTransactions(period);
+  }
+
+  function renderUpcoming(period) {
+    const upcoming = plannedOccurrenceProgress(period);
+    const rowMarkup = (entry) => {
+      const account = accountById(entry.item.accountId);
+      const remaining = roundMoney(entry.planned - entry.actual);
+      const label = entry.overdue
+        ? "Overdue"
+        : entry.status === "pending"
+          ? entry.type === "income"
+            ? "Not received yet"
+            : "Not spent yet"
+          : entry.status === "partial"
+            ? entry.type === "income"
+              ? "Underpaid"
+              : "Partially spent"
+            : entry.status === "exact"
+              ? entry.type === "income"
+                ? "Exact pay"
+                : "Paid as planned"
+              : entry.type === "income"
+                ? "Overpaid"
+                : "Overspent";
+      const detail =
+        entry.status === "pending"
+          ? `${money(entry.planned)} planned`
+          : entry.status === "partial"
+            ? entry.type === "income"
+              ? `${money(Math.max(0, remaining))} short`
+              : `${money(Math.max(0, remaining))} remaining`
+            : entry.status === "exact"
+              ? "Matched the planned amount"
+              : `${money(Math.abs(entry.difference))} ${
+                  entry.type === "income" ? "above plan" : "over plan"
+                }`;
+      const progress =
+        entry.planned > 0 ? Math.min(100, Math.max(0, (entry.actual / entry.planned) * 100)) : 0;
+      const progressMax = Math.max(0, entry.planned);
+      const progressNow = Math.min(progressMax, Math.max(0, entry.actual));
+      return `
+        <article class="upcoming-status-row tone-${entry.tone}">
+          <div class="upcoming-item-main">
+            <div class="item-icon">${entry.type === "income" ? "↓" : "↑"}</div>
+            <div class="item-copy">
+              <strong>${escapeHtml(entry.item.name)}</strong>
+              <span>${formatCompactDate(entry.date)} · ${escapeHtml(account?.name || "No account")}</span>
+            </div>
+          </div>
+          <div class="upcoming-progress">
+            <div class="upcoming-progress-heading">
+              <span class="upcoming-status-badge">${escapeHtml(label)}</span>
+              <strong>${
+                entry.status === "pending"
+                  ? money(entry.planned)
+                  : `${money(entry.actual)} / ${money(entry.planned)}`
+              }</strong>
+            </div>
+            <div
+              class="upcoming-progress-track"
+              role="progressbar"
+              aria-label="${escapeHtml(`${entry.item.name}: ${label}`)}"
+              aria-valuemin="0"
+              aria-valuemax="${escapeHtml(progressMax)}"
+              aria-valuenow="${escapeHtml(progressNow)}"
+              aria-valuetext="${escapeHtml(`${money(entry.actual)} of ${money(entry.planned)}: ${label}`)}"
+            ><i style="width:${progress.toFixed(2)}%"></i></div>
+            <small>${escapeHtml(detail)}</small>
+          </div>
+        </article>`;
+    };
+    const groupMarkup = (label, entries) =>
+      entries.length
+        ? `<section class="upcoming-group">
+            <div class="upcoming-group-heading">
+              <span>${escapeHtml(label)}</span>
+              <strong>${entries.length}</strong>
+            </div>
+            ${entries.map(rowMarkup).join("")}
+          </section>`
+        : "";
+    const outstanding = upcoming.filter((entry) => entry.status === "pending");
+    const recorded = upcoming.filter((entry) => entry.status !== "pending");
+
+    $("#upcoming-list").innerHTML = upcoming.length
+      ? `${groupMarkup("Still to come", outstanding)}${groupMarkup("Activity recorded", recorded)}`
+      : emptyState(
+          "Nothing scheduled",
+          "Add recurring expenses or income sources to map this cycle.",
+          "◫",
+        );
+  }
+
+  function renderDashboardAccounts(period) {
+    $("#account-list").innerHTML = state.accounts.length
+      ? state.accounts
+          .map((account) => {
+            const balance = accountBalance(account.id, period);
+            const discrepancy = unresolvedAdjustment(account.id, period);
+            return `
+              <div>
+                <div class="account-row">
+                  <div class="item-main">
+                    <div class="account-icon" style="color:${escapeHtml(account.color || "var(--accent)")};background:color-mix(in srgb, ${escapeHtml(
+                      account.color || "var(--accent)",
+                    )} 14%, transparent)">${escapeHtml(account.name.slice(0, 1).toUpperCase())}</div>
+                    <div class="item-copy">
+                      <strong>${escapeHtml(account.name)}</strong>
+                      <span>${escapeHtml(account.kind || "Account")}</span>
+                    </div>
+                  </div>
+                  <strong class="account-balance">${money(balance)}</strong>
+                </div>
+                ${
+                  Math.abs(discrepancy) >= 0.005
+                    ? `<div class="discrepancy-row">${money(
+                        discrepancy,
+                        { sign: true },
+                      )} is unaccounted for in this cycle.</div>`
+                    : ""
+                }
+              </div>`;
+          })
+          .join("")
+      : emptyState("No accounts yet", "Add the accounts you want to track.", "▤");
+  }
+
+  function renderRecentTransactions(period) {
+    const recent = periodTransactions(period)
+      .slice()
+      .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 6);
+    $("#recent-transactions").innerHTML = recent.length
+      ? recent.map(transactionListItem).join("")
+      : emptyState("No movement yet", "Add a transaction when money moves.", "↕");
+  }
+
+  function transactionListItem(transaction) {
+    const account = accountById(transaction.accountId);
+    const destination = accountById(transaction.toAccountId);
+    const presentation = transactionPresentation(transaction);
+    const accountText =
+      transaction.type === "transfer"
+        ? `${account?.name || "Unknown"} → ${destination?.name || "Unknown"}`
+        : account?.name || "Unknown account";
+    return `
+      <div class="stack-item">
+        <div class="item-main">
+          <div class="item-icon">${presentation.icon}</div>
+          <div class="item-copy">
+            <strong>${escapeHtml(transaction.description)}</strong>
+            <span>${formatCompactDate(transaction.date)} · ${escapeHtml(accountText)}</span>
+          </div>
+        </div>
+        <strong class="item-amount ${escapeHtml(presentation.className)}">${escapeHtml(
+          presentation.prefix,
+        )}${money(transaction.amount)}</strong>
+      </div>`;
+  }
+
+  function transactionPresentation(transaction) {
+    if (transaction.type === "transfer") {
+      const direction = transferDirection(transaction);
+      if (direction === "savings-in") {
+        return { icon: "↗", prefix: "+", className: "transfer savings-in", label: "Saved" };
+      }
+      if (direction === "savings-out") {
+        return {
+          icon: "↘",
+          prefix: "−",
+          className: "transfer savings-out",
+          label: "Savings withdrawal",
+        };
+      }
+      return { icon: "↔", prefix: "", className: "transfer", label: "Transfer" };
+    }
+    if (transaction.type === "expense") {
+      return { icon: "−", prefix: "−", className: "expense", label: "Expense" };
+    }
+    return {
+      icon: "+",
+      prefix: "+",
+      className: transaction.type,
+      label: transaction.type === "income" ? "Income" : "Refund",
+    };
+  }
+
+  function optionList(items, selectedId, blankLabel = "Choose…") {
+    return [
+      `<option value="">${escapeHtml(blankLabel)}</option>`,
+      ...items.map(
+        (item) =>
+          `<option value="${escapeHtml(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(
+            item.name,
+          )}</option>`,
+      ),
+    ].join("");
+  }
+
+  function categoryOptions(selectedId, type = "both") {
+    const categories = state.categories.filter((category) => {
+      if (category.id === UNCATEGORISED_CATEGORY_ID) return false;
+      return (
+        category.type === "both" ||
+        type === "both" ||
+        (type === "income" ? category.type === "income" : category.type === "expense")
+      );
+    });
+    const selected = selectedId || UNCATEGORISED_CATEGORY_ID;
+    return [
+      `<option value="${UNCATEGORISED_CATEGORY_ID}" ${
+        selected === UNCATEGORISED_CATEGORY_ID ? "selected" : ""
+      }>Uncategorised</option>`,
+      ...categories.map(
+        (category) =>
+          `<option value="${escapeHtml(category.id)}" ${
+            category.id === selected ? "selected" : ""
+          }>${escapeHtml(category.name)}</option>`,
+      ),
+    ].join("");
+  }
+
+  function manageableCategories() {
+    return state.categories.filter((category) => category.id !== UNCATEGORISED_CATEGORY_ID);
+  }
+
+  function reassignCategoryReferences(categoryId) {
+    let reassigned = 0;
+    state.transactions.forEach((transaction) => {
+      if (transaction.categoryId === categoryId) {
+        transaction.categoryId = UNCATEGORISED_CATEGORY_ID;
+        reassigned += 1;
+      }
+      transaction.splits?.forEach((split) => {
+        if (split.categoryId === categoryId) {
+          split.categoryId = UNCATEGORISED_CATEGORY_ID;
+          reassigned += 1;
+        }
+      });
+    });
+    state.expenses.forEach((expense) => {
+      if (expense.categoryId === categoryId) {
+        expense.categoryId = UNCATEGORISED_CATEGORY_ID;
+        reassigned += 1;
+      }
+    });
+    state.incomeSources.forEach((income) => {
+      if (income.categoryId === categoryId) {
+        income.categoryId = UNCATEGORISED_CATEGORY_ID;
+        reassigned += 1;
+      }
+    });
+    return reassigned;
+  }
+
+  function renderTransactionSelects() {
+    const quickForm = $("#quick-transaction-form");
+    const transactionForm = $("#transaction-form");
+    const accountOptions = optionList(state.accounts, "", "Choose account");
+    quickForm.elements.accountId.innerHTML = accountOptions;
+    quickForm.elements.toAccountId.innerHTML = accountOptions;
+    quickForm.elements.goalId.innerHTML = optionList(state.goals, "", "No savings goal");
+    transactionForm.elements.accountId.innerHTML = accountOptions;
+    transactionForm.elements.toAccountId.innerHTML = accountOptions;
+    transactionForm.elements.goalId.innerHTML = optionList(state.goals, "", "No savings goal");
+    renderQuickCategoryOptions();
+    renderTransactionPlanOptions();
+    syncQuickTransactionTypeFields();
+  }
+
+  function renderQuickCategoryOptions() {
+    const form = $("#quick-transaction-form");
+    const value = form.elements.categoryId.value;
+    form.elements.categoryId.innerHTML = categoryOptions(value, form.elements.type.value);
+  }
+
+  function syncQuickTransactionTypeFields() {
+    const form = $("#quick-transaction-form");
+    const isTransfer = form.elements.type.value === "transfer";
+    form.classList.toggle("is-transfer", isTransfer);
+    $$(".quick-transfer-only", form).forEach((element) => (element.hidden = !isTransfer));
+    $$(".quick-non-transfer", form).forEach((element) => (element.hidden = isTransfer));
+    form.elements.toAccountId.required = isTransfer;
+    $("#quick-account-label").textContent = isTransfer ? "From account" : "Account";
+    if (!isTransfer) {
+      form.elements.toAccountId.value = "";
+      form.elements.goalId.value = "";
+      renderQuickCategoryOptions();
+    }
+    $("#quick-suggestion").textContent = isTransfer
+      ? "Transfers affect both account balances but not income or expenses."
+      : "";
+  }
+
+  function panQuickEntryToFocusedControl(control) {
+    const scroller = $("#quick-entry-scroll");
+    if (!scroller || !control || !scroller.contains(control)) return;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const controlRect = control.getBoundingClientRect();
+    const edgePadding = 18;
+    let distance = 0;
+    if (controlRect.right > scrollerRect.right - edgePadding) {
+      distance = controlRect.right - scrollerRect.right + edgePadding;
+    } else if (controlRect.left < scrollerRect.left + edgePadding) {
+      distance = controlRect.left - scrollerRect.left - edgePadding;
+    }
+    if (Math.abs(distance) < 1) return;
+    scroller.scrollBy({
+      left: distance,
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth",
+    });
+  }
+
+  function renderTransactionPlanOptions(selectedId = "") {
+    const form = $("#transaction-form");
+    const type = form.elements.type.value;
+    const items = type === "transfer" ? [] : type === "income" ? state.incomeSources : state.expenses;
+    form.elements.linkedPlanId.innerHTML = optionList(items, selectedId, "No planned item");
+    form.elements.categoryId.innerHTML = categoryOptions(
+      form.elements.categoryId.value,
+      type === "income" ? "income" : "expense",
+    );
+  }
+
+  function renderTransactions() {
+    renderTransactionSelects();
+    const search = $("#transaction-search").value.trim().toLowerCase();
+    const typeFilter = $("#transaction-type-filter").value;
+    const transactions = periodTransactions()
+      .filter((transaction) => typeFilter === "all" || transaction.type === typeFilter)
+      .filter((transaction) => {
+        if (!search) return true;
+        const account = accountById(transaction.accountId);
+        const destination = accountById(transaction.toAccountId);
+        const goal = goalById(transaction.goalId);
+        const category = categoryById(transaction.categoryId);
+        return [
+          transaction.description,
+          transaction.reference,
+          transaction.note,
+          account?.name,
+          destination?.name,
+          goal?.name,
+          category?.name,
+        ].some((value) => String(value || "").toLowerCase().includes(search));
+      })
+      .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+
+    $("#transaction-count").textContent = `${transactions.length} transaction${
+      transactions.length === 1 ? "" : "s"
+    }`;
+    $("#transaction-table-body").innerHTML = transactions.length
+      ? transactions.map(transactionRow).join("")
+      : `<tr><td colspan="7">${emptyState(
+          search || typeFilter !== "all" ? "No matches" : "Your register is ready",
+          search || typeFilter !== "all"
+            ? "Try a different search or filter."
+            : "Use the quick row above or add a detailed transaction.",
+          "↕",
+        )}</td></tr>`;
+    renderTransferOverview(periodTransactions());
+  }
+
+  function renderTransferOverview(transactions) {
+    const stats = transferStats(transactions);
+    $("#transfer-count").textContent = `${stats.totalCount} transfer${
+      stats.totalCount === 1 ? "" : "s"
+    }`;
+    $("#transfer-metrics").innerHTML = [
+      ["Saved", stats.intoSavings, stats.intoCount, "good"],
+      ["Pulled from savings", stats.outOfSavings, stats.outCount, stats.outCount ? "warning" : ""],
+      ["Net savings movement", stats.netSavings, null, stats.netSavings >= 0 ? "good" : "bad"],
+      ["Other account moves", stats.otherTransfers, stats.otherCount, ""],
+    ]
+      .map(
+        ([label, amount, count, tone]) => `
+          <div class="transfer-metric ${tone}">
+            <span>${escapeHtml(label)}</span>
+            <strong>${money(amount, { sign: label === "Net savings movement" })}</strong>
+            ${
+              count === null
+                ? "<small>this cycle</small>"
+                : `<small>${count} transfer${count === 1 ? "" : "s"}</small>`
+            }
+          </div>`,
+      )
+      .join("");
+
+    let message = "No savings transfers yet this cycle.";
+    if (stats.netSavings > 0 && stats.outCount === 0) {
+      message = `You moved ${money(stats.netSavings)} into savings and have not pulled any back out.`;
+    } else if (stats.netSavings > 0) {
+      message = `You are still ${money(stats.netSavings)} ahead in savings, although ${stats.outCount} transfer${
+        stats.outCount === 1 ? "" : "s"
+      } moved money back out.`;
+    } else if (stats.netSavings < 0) {
+      message = `You pulled ${money(Math.abs(stats.netSavings))} more from savings than you added this cycle.`;
+    } else if (stats.intoCount || stats.outCount) {
+      message = "Transfers into and out of savings currently balance each other.";
+    } else if (stats.otherCount) {
+      message = "Account funding transfers are being tracked separately from spending.";
+    }
+    $("#transfer-message").textContent = message;
+    $("#transfer-message").className = `transfer-message ${
+      stats.netSavings < 0 ? "status-bad" : stats.netSavings > 0 ? "status-good" : ""
+    }`;
+  }
+
+  function transactionCategoryLabel(transaction) {
+    if (transaction.type === "transfer") {
+      const goal = goalById(transaction.goalId);
+      if (goal) return `Goal · ${goal.name}`;
+      const destination = accountById(transaction.toAccountId);
+      const direction = transferDirection(transaction);
+      if (direction === "savings-in") return "Savings contribution";
+      if (direction === "savings-out") return "Savings withdrawal";
+      return destination ? `Transfer to ${destination.name}` : "Transfer";
+    }
+    if (transaction.splits?.length) return `${transaction.splits.length}-way split`;
+    const linked =
+      transaction.type === "income"
+        ? incomeById(transaction.linkedPlanId)
+        : expenseById(transaction.linkedPlanId);
+    const category = categoryById(transaction.categoryId);
+    return linked?.name || category?.name || "Uncategorised";
+  }
+
+  function transactionRow(transaction) {
+    const account = accountById(transaction.accountId);
+    const destination = accountById(transaction.toAccountId);
+    const presentation = transactionPresentation(transaction);
+    const amountClass =
+      transaction.type === "transfer"
+        ? transferDirection(transaction) === "savings-in"
+          ? "status-good"
+          : transferDirection(transaction) === "savings-out"
+            ? "status-warn"
+            : ""
+        : transaction.type === "expense"
+        ? "status-bad"
+        : ["income", "refund"].includes(transaction.type)
+          ? "status-good"
+          : "";
+    return `
+      <tr data-transaction-id="${escapeHtml(transaction.id)}">
+        <td>${formatCompactDate(transaction.date)}</td>
+        <td class="transaction-description-cell">
+          <strong>${escapeHtml(transaction.description)}</strong>
+          ${transaction.reference ? `<small>${escapeHtml(transaction.reference)}</small>` : ""}
+        </td>
+        <td>${escapeHtml(
+          transaction.type === "transfer"
+            ? `${account?.name || "Unknown"} → ${destination?.name || "Unknown"}`
+            : account?.name || "Unknown",
+        )}</td>
+        <td>${escapeHtml(transactionCategoryLabel(transaction))}</td>
+        <td><span class="type-badge ${escapeHtml(presentation.className)}">${escapeHtml(
+          presentation.label,
+        )}</span></td>
+        <td class="numeric ${amountClass}">${escapeHtml(presentation.prefix)}${money(
+          Number(transaction.amount),
+        )}</td>
+        <td class="row-actions">
+          <button type="button" data-edit-transaction="${escapeHtml(transaction.id)}" aria-label="Edit ${escapeHtml(
+            transaction.description,
+          )}">Edit</button>
+        </td>
+      </tr>`;
+  }
+
+  function renderPlan() {
+    $$(".tab-button").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.planTab === currentPlanTab);
+    });
+    $$(".plan-tab").forEach((panel) => {
+      panel.classList.toggle("is-active", panel.id === `plan-tab-${currentPlanTab}`);
+    });
+    renderExpenseCards();
+    renderIncomeCards();
+    renderAccountCards();
+    renderCategoryCards();
+  }
+
+  function renderExpenseCards() {
+    const period = activePeriod();
+    $("#expense-card-grid").innerHTML = state.expenses.length
+      ? state.expenses
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((expense) => {
+            const occurrences = scheduleOccurrences(expense, period.startDate, period.endDate);
+            const account = accountById(expense.accountId);
+            const category = categoryById(expense.categoryId);
+            const inCycle = occurrences.reduce((sum, occurrence) => sum + occurrence.amount, 0);
+            return `
+              <article class="entity-card">
+                <div class="entity-top">
+                  <div>
+                    <span class="eyebrow">${escapeHtml(category?.name || "Uncategorised")}</span>
+                    <h3>${escapeHtml(expense.name)}</h3>
+                  </div>
+                  <button class="text-button" type="button" data-edit-entity="expense" data-entity-id="${escapeHtml(
+                    expense.id,
+                  )}">Edit</button>
+                </div>
+                <strong class="entity-amount">${money(expense.amount)}</strong>
+                <div class="entity-meta">
+                  <span>${escapeHtml(scheduleText(expense))}</span>
+                  <span>·</span>
+                  <span>Next from ${formatCompactDate(itemSchedule(expense).anchorDate)}</span>
+                </div>
+                <div class="entity-card-footer">
+                  <span>${escapeHtml(account?.name || "No default account")}</span>
+                  <span class="pill ${inCycle > 0 ? "bad" : ""}">${
+                    inCycle > 0 ? `${money(inCycle)} this cycle` : "Not due this cycle"
+                  }</span>
+                </div>
+              </article>`;
+          })
+          .join("")
+      : emptyState(
+          "No recurring expenses",
+          "Add bills and regular spending with the date and interval they really use.",
+          "◫",
+        );
+  }
+
+  function renderIncomeCards() {
+    const period = activePeriod();
+    $("#income-card-grid").innerHTML = state.incomeSources.length
+      ? state.incomeSources
+          .slice()
+          .sort((a, b) => Number(b.id === state.settings.primaryIncomeId) - Number(a.id === state.settings.primaryIncomeId))
+          .map((income) => {
+            const occurrences = scheduleOccurrences(income, period.startDate, period.endDate);
+            const account = accountById(income.accountId);
+            const inCycle = occurrences.reduce((sum, occurrence) => sum + occurrence.amount, 0);
+            return `
+              <article class="entity-card">
+                <div class="entity-top">
+                  <div>
+                    <span class="eyebrow">${
+                      income.id === state.settings.primaryIncomeId ? "Primary income" : "Income"
+                    }</span>
+                    <h3>${escapeHtml(income.name)}</h3>
+                  </div>
+                  <button class="text-button" type="button" data-edit-entity="income" data-entity-id="${escapeHtml(
+                    income.id,
+                  )}">Edit</button>
+                </div>
+                <strong class="entity-amount">${money(income.amount)}</strong>
+                <div class="entity-meta">
+                  <span>${escapeHtml(scheduleText(income))}</span>
+                </div>
+                <div class="entity-card-footer">
+                  <span>${escapeHtml(account?.name || "No default account")}</span>
+                  <span class="pill ${inCycle > 0 ? "good" : ""}">${
+                    inCycle > 0 ? `${money(inCycle)} this cycle` : "Not due this cycle"
+                  }</span>
+                </div>
+              </article>`;
+          })
+          .join("")
+      : emptyState(
+          "No income sources",
+          "Add regular pay or the expected dates for irregular work.",
+          "↓",
+        );
+  }
+
+  function renderAccountCards() {
+    const period = activePeriod();
+    $("#account-card-grid").innerHTML = state.accounts.length
+      ? state.accounts
+          .map((account) => {
+            const balance = accountBalance(account.id, period);
+            const opening = Number(period.openingBalances?.[account.id]) || 0;
+            const discrepancy = unresolvedAdjustment(account.id, period);
+            return `
+              <article class="entity-card">
+                <div class="entity-top">
+                  <div>
+                    <span class="eyebrow">${escapeHtml(account.kind || "Account")}</span>
+                    <h3>${escapeHtml(account.name)}</h3>
+                  </div>
+                  <button class="text-button" type="button" data-edit-entity="account" data-entity-id="${escapeHtml(
+                    account.id,
+                  )}">Edit</button>
+                </div>
+                <strong class="entity-amount">${money(balance)}</strong>
+                <div class="entity-meta">
+                  <span>Opened at ${money(opening)}</span>
+                </div>
+                ${
+                  Math.abs(discrepancy) >= 0.005
+                    ? `<div class="discrepancy-row">
+                        <span>${money(discrepancy, { sign: true })} remains unaccounted for.</span>
+                        <button class="text-button" type="button" data-resolve-account="${escapeHtml(
+                          account.id,
+                        )}">Resolve</button>
+                      </div>`
+                    : ""
+                }
+                <div class="entity-card-footer">
+                  <span>Manual checks are kept in the archive</span>
+                  <button class="text-button" type="button" data-adjust-account="${escapeHtml(
+                    account.id,
+                  )}">Adjust balance</button>
+                </div>
+              </article>`;
+          })
+          .join("")
+      : emptyState("No accounts", "Add an account to begin tracking balances.", "▤");
+  }
+
+  function renderCategoryCards() {
+    const categories = manageableCategories();
+    $("#category-card-grid").innerHTML = categories.length
+      ? categories
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map(
+            (category) => `
+              <article class="category-card" style="--category-color:${escapeHtml(category.color || "#8eadcf")}">
+                <i class="category-dot"></i>
+                <div class="category-name">
+                  <h3>${escapeHtml(category.name)}</h3>
+                  <span>${escapeHtml(category.type)}</span>
+                </div>
+                <button class="text-button" type="button" data-edit-entity="category" data-entity-id="${escapeHtml(
+                  category.id,
+                )}">Edit</button>
+              </article>`,
+          )
+          .join("")
+      : emptyState("No categories", "Create categories to make patterns easier to see.", "•");
+  }
+
+  function goalProjection(goal) {
+    const target = Math.max(0, Number(goal.targetAmount) || 0);
+    const current = Math.max(0, Number(goal.currentAmount) || 0);
+    const remaining = Math.max(0, target - current);
+    const startDate = goal.startDate || localDate();
+    const intervalDays = payIntervalDays();
+    if (goal.mode === "contribution") {
+      const contribution = Math.max(0, Number(goal.contributionPerPeriod) || 0);
+      const periods = contribution > 0 ? Math.ceil(remaining / contribution) : Infinity;
+      const projectedDate = Number.isFinite(periods)
+        ? addDays(localDate(), periods * intervalDays)
+        : null;
+      return {
+        target,
+        current,
+        remaining,
+        contribution,
+        endDate: projectedDate,
+        durationDays: projectedDate ? daysBetween(localDate(), projectedDate) : Infinity,
+      };
+    }
+    const endDate = goal.endDate || localDate();
+    const daysRemaining = Math.max(0, daysBetween(localDate(), endDate));
+    const periodsRemaining = Math.max(1, Math.ceil(daysRemaining / intervalDays));
+    return {
+      target,
+      current,
+      remaining,
+      contribution: roundMoney(remaining / periodsRemaining),
+      endDate,
+      durationDays: daysRemaining,
+      startDate,
+    };
+  }
+
+  function goalTransfers(goal, period = null) {
+    return state.transactions
+      .filter(
+        (transaction) =>
+          transaction.type === "transfer" &&
+          transaction.goalId === goal.id &&
+          (!period || transaction.periodId === period.id),
+      )
+      .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+  }
+
+  function goalTransferNet(goal, period = null) {
+    return roundMoney(
+      goalTransfers(goal, period).reduce(
+        (sum, transaction) => sum + goalTransferEffect(transaction),
+        0,
+      ),
+    );
+  }
+
+  function goalProgressDate(goal, projection, today = localDate()) {
+    const latestTransferDate = goalTransfers(goal).at(-1)?.date || "";
+    const startDate = goal.startDate || today;
+    const endDate = projection.endDate || addDays(today, payIntervalDays());
+    let progressDate = latestTransferDate > today ? latestTransferDate : today;
+    if (progressDate < startDate) progressDate = startDate;
+    if (progressDate > endDate) progressDate = endDate;
+    return progressDate;
+  }
+
+  function renderGoals() {
+    if (!selectedGoalId || !goalById(selectedGoalId)) selectedGoalId = state.goals[0]?.id || null;
+    $("#goal-list").innerHTML = state.goals.length
+      ? state.goals
+          .map((goal) => {
+            const projection = goalProjection(goal);
+            const progress =
+              projection.target > 0 ? Math.min(100, (projection.current / projection.target) * 100) : 0;
+            return `
+              <article class="goal-card ${goal.id === selectedGoalId ? "is-selected" : ""}" data-select-goal="${escapeHtml(
+                goal.id,
+              )}" tabindex="0" role="button" aria-label="View ${escapeHtml(goal.name)}">
+                <div class="entity-top">
+                  <h3>${escapeHtml(goal.name)}</h3>
+                  <span>${Math.round(progress)}%</span>
+                </div>
+                <div class="goal-progress" style="--goal-color:${escapeHtml(goal.color || "#75c7a0")}">
+                  <i style="width:${progress}%"></i>
+                </div>
+                <div class="goal-meta">
+                  <span>${money(projection.current)} saved</span>
+                  <span>${money(projection.target)}</span>
+                </div>
+              </article>`;
+          })
+          .join("")
+      : emptyState("No goals yet", "Turn something you care about into a visible plan.", "◎");
+
+    renderGoalDetail();
+  }
+
+  function renderGoalDetail() {
+    const goal = goalById(selectedGoalId);
+    const container = $("#goal-detail");
+    if (!goal) {
+      container.innerHTML = emptyState(
+        "Choose a goal",
+        "Your target line and progress story will appear here.",
+        "◎",
+      );
+      return;
+    }
+    const projection = goalProjection(goal);
+    const account = accountById(goal.accountId);
+    const progress =
+      projection.target > 0 ? Math.min(100, (projection.current / projection.target) * 100) : 0;
+    const today = localDate();
+    const progressDate = goalProgressDate(goal, projection, today);
+    const elapsed = Math.max(0, daysBetween(goal.startDate || today, progressDate));
+    const total = Math.max(1, daysBetween(goal.startDate || today, projection.endDate || today));
+    const expectedNow = Math.min(
+      projection.target,
+      Number(goal.startingAmount || 0) +
+        (projection.target - Number(goal.startingAmount || 0)) * Math.min(1, elapsed / total),
+    );
+    const ahead = roundMoney(projection.current - expectedNow);
+    const cycleTransferNet = goalTransferNet(goal, activePeriod());
+    const recentGoalTransfers = goalTransfers(goal).slice(-4).reverse();
+    container.innerHTML = `
+      <div class="goal-detail-header">
+        <div>
+          <span class="eyebrow">${ahead >= 0 ? "On track" : "Needs attention"}</span>
+          <h2>${escapeHtml(goal.name)}</h2>
+        </div>
+        <button class="quiet-button" type="button" data-edit-entity="goal" data-entity-id="${escapeHtml(
+          goal.id,
+        )}">Edit goal</button>
+      </div>
+      <div class="goal-detail-value">${money(projection.current)}</div>
+      <p>${money(projection.remaining)} left to reach ${money(projection.target)}.</p>
+      <div class="goal-facts">
+        <div class="goal-fact"><span>Per pay cycle</span><strong>${money(
+          projection.contribution,
+        )}</strong></div>
+        <div class="goal-fact"><span>Finish date</span><strong>${
+          projection.endDate ? formatDate(projection.endDate) : "Set a contribution"
+        }</strong></div>
+        <div class="goal-fact"><span>Time remaining</span><strong>${
+          Number.isFinite(projection.durationDays)
+            ? formatDuration(projection.durationDays)
+            : "Not yet calculable"
+        }</strong></div>
+      </div>
+      <div class="callout ${ahead >= 0 ? "" : "warning"}">
+        ${
+          ahead >= 0
+            ? `You are ${money(ahead)} ahead of the steady saving line. Nicely paced.`
+            : `You are ${money(Math.abs(ahead))} behind the steady saving line. A small course correction can bring it back.`
+        }
+         ${account ? ` This goal is associated with ${escapeHtml(account.name)}.` : ""}
+         ${
+           progressDate > today
+             ? ` The progress point is plotted at ${formatDate(progressDate)}, the date of the latest linked transfer.`
+             : ""
+         }
+      </div>
+      <div class="goal-transfer-summary">
+        <div class="panel-heading compact">
+          <div>
+            <span class="eyebrow">Actual contributions</span>
+            <h3>Linked savings transfers</h3>
+          </div>
+          <strong class="${cycleTransferNet >= 0 ? "status-good" : "status-bad"}">${money(
+            cycleTransferNet,
+            { sign: true },
+          )} this cycle</strong>
+        </div>
+        <p>
+          The planned amount above is your target pace. Linked transfers are the actual progress and
+          are never treated as expenses.
+        </p>
+        <div class="goal-transfer-list">
+          ${
+            recentGoalTransfers.length
+              ? recentGoalTransfers
+                  .map((transaction) => {
+                    const effect = goalTransferEffect(transaction);
+                    const otherAccount =
+                      effect >= 0
+                        ? accountById(transaction.accountId)
+                        : accountById(transaction.toAccountId);
+                    return `<div>
+                      <span>${formatCompactDate(transaction.date)} · ${escapeHtml(
+                        otherAccount?.name || transaction.description,
+                      )}</span>
+                      <strong class="${effect >= 0 ? "status-good" : "status-bad"}">${money(effect, {
+                        sign: true,
+                      })}</strong>
+                    </div>`;
+                  })
+                  .join("")
+              : "<p>No transfers have been linked to this goal yet.</p>"
+          }
+        </div>
+      </div>
+      <div class="goal-chart-wrap">
+        <canvas id="goal-chart" height="230" aria-label="Savings goal progress chart"></canvas>
+      </div>
+      <div class="dialog-actions" style="position:static;padding:18px 0 0;border:0;background:transparent">
+        <button class="primary-button" type="button" data-add-goal-progress="${escapeHtml(
+          goal.id,
+        )}">Reconcile saved amount</button>
+      </div>`;
+    requestAnimationFrame(() => drawGoalChart(goal, projection));
+  }
+
+  function canvasSetup(canvas, cssHeight) {
+    if (!canvas) return null;
+    const width = Math.max(300, canvas.clientWidth || 600);
+    const height = cssHeight;
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    const context = canvas.getContext("2d");
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    return { context, width, height };
+  }
+
+  function drawGoalChart(goal, projection) {
+    const setup = canvasSetup($("#goal-chart"), 230);
+    if (!setup) return;
+    const { context, width, height } = setup;
+    const padding = { top: 20, right: 18, bottom: 35, left: 18 };
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const start = parseDate(goal.startDate || localDate());
+    const end = parseDate(projection.endDate || addDays(localDate(), payIntervalDays()));
+    const progressDate = parseDate(goalProgressDate(goal, projection));
+    const totalDays = Math.max(1, Math.round((end - start) / 86400000));
+    const progressDays = Math.max(
+      0,
+      Math.min(totalDays, Math.round((progressDate - start) / 86400000)),
+    );
+    const starting = Number(goal.startingAmount || 0);
+    const target = Math.max(1, projection.target);
+    const x = (day) => padding.left + (day / totalDays) * plotWidth;
+    const y = (amount) =>
+      padding.top + plotHeight - (Math.max(0, Math.min(target, amount)) / target) * plotHeight;
+
+    context.strokeStyle = themeCss("--border");
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(padding.left, y(0));
+    context.lineTo(width - padding.right, y(0));
+    context.stroke();
+
+    context.setLineDash([6, 5]);
+    context.strokeStyle = themeCss("--accent");
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(x(0), y(starting));
+    context.lineTo(x(totalDays), y(target));
+    context.stroke();
+    context.setLineDash([]);
+
+    context.strokeStyle = goal.color || themeCss("--good");
+    context.lineWidth = 4;
+    context.lineCap = "round";
+    context.beginPath();
+    context.moveTo(x(0), y(starting));
+    let runningAmount = starting;
+    goalTransfers(goal)
+      .filter((transaction) => {
+        const day = Math.round((parseDate(transaction.date) - start) / 86400000);
+        return day >= 0 && day <= progressDays;
+      })
+      .forEach((transaction) => {
+        const day = Math.max(
+          0,
+          Math.min(progressDays, Math.round((parseDate(transaction.date) - start) / 86400000)),
+        );
+        context.lineTo(x(day), y(runningAmount));
+        runningAmount = roundMoney(runningAmount + goalTransferEffect(transaction));
+        context.lineTo(x(day), y(runningAmount));
+      });
+    context.lineTo(x(progressDays), y(projection.current));
+    context.stroke();
+
+    context.fillStyle = goal.color || themeCss("--good");
+    context.beginPath();
+    context.arc(x(progressDays), y(projection.current), 5, 0, Math.PI * 2);
+    context.fill();
+
+    context.fillStyle = themeCss("--faint");
+    context.font = "11px Segoe UI, sans-serif";
+    context.textAlign = "left";
+    context.fillText(formatCompactDate(goal.startDate || localDate()), padding.left, height - 12);
+    context.textAlign = "right";
+    context.fillText(formatCompactDate(projection.endDate || localDate()), width - padding.right, height - 12);
+    context.textAlign = "left";
+    context.fillText(money(target, { cents: false }), padding.left, padding.top - 5);
+  }
+
+  function insightPeriods() {
+    return state.periods
+      .slice()
+      .sort((a, b) => a.startDate.localeCompare(b.startDate))
+      .map((period) => ({ period, summary: summaryForPeriod(period) }));
+  }
+
+  function insightGroups() {
+    const grouping = $("#insight-grouping").value;
+    const periods = insightPeriods();
+    if (grouping === "period") {
+      return periods.slice(-8).map(({ period, summary }) => ({
+        label: formatCompactDate(period.startDate),
+        ...summary,
+        ...transferStats(periodTransactions(period)),
+      }));
+    }
+    const groups = new Map();
+    const ensureMonth = (date) => {
+      const monthKey = date.slice(0, 7);
+      if (!groups.has(monthKey)) {
+        groups.set(monthKey, {
+          label: new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" }).format(
+            parseDate(`${monthKey}-01`),
+          ),
+          budgetIncome: 0,
+          actualIncome: 0,
+          budgetExpenses: 0,
+          actualExpenses: 0,
+          totalCount: 0,
+          intoSavings: 0,
+          intoCount: 0,
+          outOfSavings: 0,
+          outCount: 0,
+          otherTransfers: 0,
+          otherCount: 0,
+          netSavings: 0,
+        });
+      }
+      return groups.get(monthKey);
+    };
+
+    periods.forEach(({ period, summary }) => {
+      let occurrences = period.archiveOccurrences;
+      if (!occurrences && period.status === "active") {
+        occurrences = {
+          income: state.incomeSources.flatMap((item) =>
+            scheduleOccurrences(item, period.startDate, period.endDate),
+          ),
+          expenses: state.expenses.flatMap((item) =>
+            scheduleOccurrences(item, period.startDate, period.endDate),
+          ),
+        };
+      }
+      if (occurrences) {
+        occurrences.income.forEach((entry) => {
+          const group = ensureMonth(entry.date);
+          group.budgetIncome = roundMoney(group.budgetIncome + Number(entry.amount || 0));
+        });
+        occurrences.expenses.forEach((entry) => {
+          const group = ensureMonth(entry.date);
+          group.budgetExpenses = roundMoney(group.budgetExpenses + Number(entry.amount || 0));
+        });
+      } else {
+        const group = ensureMonth(period.startDate);
+        group.budgetIncome = roundMoney(group.budgetIncome + summary.budgetIncome);
+        group.budgetExpenses = roundMoney(group.budgetExpenses + summary.budgetExpenses);
+      }
+
+      periodTransactions(period).forEach((transaction) => {
+        const group = ensureMonth(transaction.date);
+        const amount = Number(transaction.amount || 0);
+        if (transaction.type === "income") group.actualIncome = roundMoney(group.actualIncome + amount);
+        if (transaction.type === "expense") {
+          group.actualExpenses = roundMoney(group.actualExpenses + amount);
+        }
+        if (transaction.type === "refund") {
+          group.actualExpenses = roundMoney(group.actualExpenses - amount);
+        }
+        if (transaction.type === "transfer") {
+          const direction = transferDirection(transaction);
+          group.totalCount += 1;
+          if (direction === "savings-in") {
+            group.intoSavings = roundMoney(group.intoSavings + amount);
+            group.intoCount += 1;
+          } else if (direction === "savings-out") {
+            group.outOfSavings = roundMoney(group.outOfSavings + amount);
+            group.outCount += 1;
+          } else {
+            group.otherTransfers = roundMoney(group.otherTransfers + amount);
+            group.otherCount += 1;
+          }
+          group.netSavings = roundMoney(group.intoSavings - group.outOfSavings);
+        }
+      });
+    });
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, group]) => group)
+      .slice(-8);
+  }
+
+  function renderInsights() {
+    const groups = insightGroups();
+    const latest = groups[groups.length - 1];
+    if (!latest) {
+      $("#insight-message").innerHTML =
+        "<strong>Your first pattern is waiting.</strong><p>Add a plan and a few transactions, then return here.</p>";
+    } else {
+      const expenseDifference = roundMoney(latest.budgetExpenses - latest.actualExpenses);
+      const incomeDifference = roundMoney(latest.actualIncome - latest.budgetIncome);
+      let heading = "You are building a useful baseline.";
+      let copy = "Keep capturing transactions—the clearest patterns appear over several pay cycles.";
+      if (expenseDifference > 5) {
+        heading = "You’re spending less than planned—well done.";
+        copy = `${money(expenseDifference)} remained in the expense plan for ${latest.label}.`;
+      } else if (expenseDifference < -5) {
+        heading = "This period ran above the expense plan.";
+        copy = `${money(Math.abs(expenseDifference))} went beyond the plan. Next cycle, check whether the plan or the spending needs to change.`;
+      } else if (incomeDifference > 5) {
+        heading = "Income landed ahead of projection.";
+        copy = `${money(incomeDifference)} more arrived than expected for ${latest.label}.`;
+      }
+      $("#insight-message").innerHTML = `<strong>${escapeHtml(heading)}</strong><p>${escapeHtml(
+        copy,
+      )}</p>`;
+    }
+
+    requestAnimationFrame(() => {
+      drawBarChart($("#expense-chart"), groups, "budgetExpenses", "actualExpenses");
+      drawBarChart($("#income-chart"), groups, "budgetIncome", "actualIncome");
+    });
+    renderTransferHistory(groups);
+    renderCategoryBreakdown();
+  }
+
+  function renderTransferHistory(groups) {
+    const activeGroups = groups.filter((group) => group.totalCount > 0);
+    $("#transfer-history").innerHTML = activeGroups.length
+      ? `<div class="transfer-history-header">
+          <span>Period</span><span>Saved</span><span>Withdrawn</span><span>Net</span><span>Withdrawals</span>
+        </div>
+        ${activeGroups
+          .map(
+            (group) => `
+              <div class="transfer-history-row">
+                <strong>${escapeHtml(group.label)}</strong>
+                <span data-label="Saved" class="status-good">${money(group.intoSavings)}</span>
+                <span data-label="Withdrawn" class="${group.outOfSavings > 0 ? "status-warn" : ""}">${money(
+                  group.outOfSavings,
+                )}</span>
+                <strong data-label="Net" class="${group.netSavings >= 0 ? "status-good" : "status-bad"}">${money(
+                  group.netSavings,
+                  { sign: true },
+                )}</strong>
+                <span data-label="Withdrawals">${group.outCount}</span>
+              </div>`,
+          )
+          .join("")}`
+      : emptyState(
+          "No transfer pattern yet",
+          "Record transfers to see savings contributions and withdrawals separately from spending.",
+          "↔",
+        );
+  }
+
+  function drawBarChart(canvas, groups, budgetKey, actualKey) {
+    const setup = canvasSetup(canvas, 280);
+    if (!setup) return;
+    const { context, width, height } = setup;
+    const padding = { top: 18, right: 12, bottom: 40, left: 12 };
+    const plotWidth = width - padding.left - padding.right;
+    const plotHeight = height - padding.top - padding.bottom;
+    const max = Math.max(
+      1,
+      ...groups.flatMap((group) => [Number(group[budgetKey]) || 0, Number(group[actualKey]) || 0]),
+    );
+    const groupWidth = plotWidth / Math.max(1, groups.length);
+    const barWidth = Math.min(24, groupWidth * 0.27);
+    const y = (value) => padding.top + plotHeight - (Math.max(0, value) / max) * plotHeight;
+
+    context.strokeStyle = themeCss("--border");
+    context.lineWidth = 1;
+    for (let line = 0; line <= 3; line += 1) {
+      const lineY = padding.top + (plotHeight / 3) * line;
+      context.beginPath();
+      context.moveTo(padding.left, lineY);
+      context.lineTo(width - padding.right, lineY);
+      context.stroke();
+    }
+
+    groups.forEach((group, index) => {
+      const center = padding.left + groupWidth * index + groupWidth / 2;
+      const budget = Math.max(0, Number(group[budgetKey]) || 0);
+      const actual = Math.max(0, Number(group[actualKey]) || 0);
+      context.fillStyle = themeCss("--accent");
+      context.fillRect(center - barWidth - 2, y(budget), barWidth, padding.top + plotHeight - y(budget));
+      context.fillStyle = themeCss("--good");
+      context.fillRect(center + 2, y(actual), barWidth, padding.top + plotHeight - y(actual));
+      context.fillStyle = themeCss("--faint");
+      context.font = "10px Segoe UI, sans-serif";
+      context.textAlign = "center";
+      context.fillText(group.label, center, height - 15);
+    });
+
+    if (!groups.length) {
+      context.fillStyle = themeCss("--faint");
+      context.font = "13px Segoe UI, sans-serif";
+      context.textAlign = "center";
+      context.fillText("No period data yet", width / 2, height / 2);
+    }
+  }
+
+  function renderCategoryBreakdown() {
+    renderUncategorisedAlert("#insight-uncategorised-alert");
+    const totals = categoryTotalsForPeriod();
+    const rows = Array.from(totals.entries())
+      .filter(([, amount]) => amount > 0)
+      .sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, ...rows.map(([, amount]) => amount));
+    $("#category-breakdown").innerHTML = rows.length
+      ? rows
+          .map(([categoryId, amount]) => {
+            const category = categoryById(categoryId) || {
+              name: "Uncategorised",
+              color: themeCss("--faint"),
+            };
+            return `
+              <div class="breakdown-row">
+                <span class="breakdown-label">${escapeHtml(category.name)}</span>
+                <div class="breakdown-track"><i style="width:${(amount / max) * 100}%;background:${escapeHtml(
+                  category.color || "#8eadcf",
+                )}"></i></div>
+                <strong>${money(amount)}</strong>
+              </div>`;
+          })
+          .join("")
+      : emptyState(
+          "No category totals yet",
+          "Expense and refund transactions will build this view.",
+          "⌁",
+        );
+  }
+
+  function renderArchive() {
+    const archived = state.periods
+      .filter((period) => period.status === "archived")
+      .sort((a, b) => b.endDate.localeCompare(a.endDate));
+    $("#archive-list").innerHTML = archived.length
+      ? archived.map(archiveCard).join("")
+      : emptyState(
+          "No archived cycles",
+          "When you close a pay cycle, its plan, transactions, balances, and discrepancies will stay here.",
+          '<span class="archive-box-icon empty-archive-box" aria-hidden="true"></span>',
+        );
+  }
+
+  function archiveCard(period) {
+    const summary = summaryForPeriod(period);
+    const transactions = periodTransactions(period)
+      .slice()
+      .sort((a, b) => b.date.localeCompare(a.date));
+    const discrepancies = state.adjustments.filter(
+      (adjustment) => adjustment.periodId === period.id && adjustment.resolved !== true,
+    );
+    return `
+      <details class="archive-card">
+        <summary class="archive-summary">
+          <div>
+            <span>Pay cycle</span>
+            <strong>${formatDate(period.startDate)} – ${formatDate(period.endDate)}</strong>
+          </div>
+          <div><span>Income</span><strong>${money(summary.actualIncome)}</strong></div>
+          <div><span>Expenses</span><strong>${money(summary.actualExpenses)}</strong></div>
+          <div><span>Net</span><strong class="${
+            summary.actualNet >= 0 ? "status-good" : "status-bad"
+          }">${money(summary.actualNet)}</strong></div>
+          <span class="pill">${transactions.length} entries</span>
+        </summary>
+        <div class="archive-details">
+          ${
+            discrepancies.length
+              ? `<div class="callout warning">${discrepancies.length} unresolved balance difference${
+                  discrepancies.length === 1 ? "" : "s"
+                } totalling ${money(
+                  discrepancies.reduce((sum, item) => sum + Math.abs(Number(item.delta) || 0), 0),
+                )}.</div>`
+              : ""
+          }
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Type</th><th class="numeric">Amount</th></tr></thead>
+              <tbody>
+                ${
+                  transactions.length
+                    ? transactions
+                        .map((transaction) => {
+                          const account = accountById(transaction.accountId);
+                          const destination = accountById(transaction.toAccountId);
+                          const presentation = transactionPresentation(transaction);
+                          return `<tr>
+                            <td>${formatCompactDate(transaction.date)}</td>
+                            <td>${escapeHtml(transaction.description)}</td>
+                            <td>${escapeHtml(
+                              transaction.type === "transfer"
+                                ? `${account?.name || "Unknown"} → ${destination?.name || "Unknown"}`
+                                : account?.name || "Unknown",
+                            )}</td>
+                            <td>${escapeHtml(presentation.label)}</td>
+                            <td class="numeric ${
+                              transferDirection(transaction) === "savings-in"
+                                ? "status-good"
+                                : transferDirection(transaction) === "savings-out"
+                                  ? "status-warn"
+                                  : ""
+                            }">${escapeHtml(presentation.prefix)}${money(transaction.amount)}</td>
+                          </tr>`;
+                        })
+                        .join("")
+                    : '<tr><td colspan="5">No transactions in this cycle.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>`;
+  }
+
+  function renderSettings() {
+    const form = $("#settings-form");
+    const period = activePeriod();
+    form.elements.currency.value = state.settings.currency;
+    form.elements.payIntervalValue.value = state.settings.payIntervalValue;
+    form.elements.payIntervalUnit.value = state.settings.payIntervalUnit;
+    form.elements.periodStart.value = period.startDate;
+    form.elements.primaryIncomeId.innerHTML = optionList(
+      state.incomeSources,
+      state.settings.primaryIncomeId,
+      "No primary income",
+    );
+    const overdue = backupIsOverdue();
+    const backupPill = $("#backup-status-pill");
+    const hasExternalBackup = Number.isFinite(lastExternalBackupTime());
+    backupPill.textContent = overdue
+      ? "Backup due"
+      : hasExternalBackup
+        ? "Backup protected"
+        : "First backup due soon";
+    backupPill.className = `pill ${overdue ? "bad" : hasExternalBackup ? "good" : ""}`;
+    const dateTime = new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    const lastBackup = lastExternalBackupTime();
+    const dueAt = backupDueAt();
+    $("#data-health").innerHTML = `
+      <strong>Browser working copy + external JSON backup</strong><br>
+      Last browser save: ${
+        state.metadata.lastSavedAt
+          ? dateTime.format(new Date(state.metadata.lastSavedAt))
+          : "not yet"
+      }.<br>
+      Last external backup: ${
+        Number.isFinite(lastBackup) ? dateTime.format(new Date(lastBackup)) : "not recorded"
+      }.<br>
+      ${overdue ? "Backup required now" : `Next backup due: ${dateTime.format(new Date(dueAt))}`}.<br>
+      Suggested filename: <code>${escapeHtml(backupFilename())}</code>.<br>
+      JSON schema v${state.schemaVersion}.`;
+  }
+
+  function showDialog(dialog) {
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+
+  function closeDialog(dialog) {
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
+  function openTransactionDialog(transactionId = null) {
+    if (!state.accounts.length) {
+      toast("Add an account before recording a transaction.", "error");
+      switchView("plan");
+      currentPlanTab = "accounts";
+      renderPlan();
+      return;
+    }
+    const dialog = $("#transaction-dialog");
+    const form = $("#transaction-form");
+    const transaction = transactionId
+      ? state.transactions.find((item) => item.id === transactionId)
+      : null;
+    form.reset();
+    form.elements.id.value = transaction?.id || "";
+    form.elements.date.value = transaction?.date || localDate();
+    form.elements.type.value = transaction?.type || "expense";
+    form.elements.description.value = transaction?.description || "";
+    form.elements.amount.value = transaction?.amount ?? "";
+    form.elements.reference.value = transaction?.reference || "";
+    form.elements.note.value = transaction?.note || "";
+    renderTransactionPlanOptions(transaction?.linkedPlanId || "");
+    form.elements.accountId.value = transaction?.accountId || state.accounts[0]?.id || "";
+    form.elements.toAccountId.value = transaction?.toAccountId || "";
+    form.elements.goalId.value = transaction?.goalId || "";
+    form.elements.categoryId.value = transaction?.categoryId || "";
+    form.elements.isSplit.checked = Boolean(transaction?.splits?.length);
+    $("#transaction-dialog-title").textContent = transaction ? "Edit transaction" : "Add transaction";
+    $("#delete-transaction").hidden = !transaction;
+    syncTransactionTypeFields();
+    renderSplitLines(transaction?.splits || []);
+    showDialog(dialog);
+    setTimeout(() => form.elements.description.focus(), 20);
+  }
+
+  function syncTransactionTypeFields() {
+    const form = $("#transaction-form");
+    const type = form.elements.type.value;
+    const isTransfer = type === "transfer";
+    $$(".transfer-only", form).forEach((element) => (element.hidden = !isTransfer));
+    $$(".non-transfer", form).forEach((element) => (element.hidden = isTransfer));
+    form.elements.toAccountId.required = isTransfer;
+    form.elements.isSplit.disabled = isTransfer || type === "income";
+    $("#transaction-account-label").textContent = isTransfer ? "From account" : "Account";
+    if (form.elements.isSplit.disabled) form.elements.isSplit.checked = false;
+    if (!isTransfer) {
+      form.elements.toAccountId.value = "";
+      form.elements.goalId.value = "";
+    }
+    $("#split-editor").hidden = !form.elements.isSplit.checked;
+    renderTransactionPlanOptions(form.elements.linkedPlanId.value);
+    $("#transaction-suggestion").textContent = isTransfer
+      ? "Transfers affect both account balances but not income or expenses."
+      : "";
+  }
+
+  function applyPlanSuggestion(form, description, type, suggestionTarget) {
+    if (type === "transfer") {
+      suggestionTarget.textContent = "";
+      return;
+    }
+    const planType = type === "income" ? "income" : "expense";
+    const match = matchingPlan(description, planType);
+    if (!match) {
+      suggestionTarget.textContent = "";
+      return;
+    }
+    if (match.accountId) form.elements.accountId.value = match.accountId;
+    if (match.categoryId && form.elements.categoryId) form.elements.categoryId.value = match.categoryId;
+    if (form.elements.linkedPlanId) form.elements.linkedPlanId.value = match.id;
+    suggestionTarget.textContent = `Matched “${match.name}” · account and category suggested.`;
+  }
+
+  function applySelectedGoalAccount(form) {
+    const goal = goalById(form.elements.goalId.value);
+    if (!goal?.accountId) return;
+    if (form.elements.accountId.value !== goal.accountId) {
+      form.elements.toAccountId.value = goal.accountId;
+    }
+  }
+
+  function splitLineTemplate(split = {}) {
+    return `
+      <div class="split-line">
+        <label>
+          <span>Category</span>
+          <select data-split-category>${categoryOptions(split.categoryId || "", "expense")}</select>
+        </label>
+        <label>
+          <span>Planned expense</span>
+          <select data-split-plan>${optionList(
+            state.expenses,
+            split.linkedPlanId || "",
+            "No planned item",
+          )}</select>
+        </label>
+        <label>
+          <span>Amount</span>
+          <input data-split-amount type="number" min="0" step="0.01" value="${
+            split.amount ?? ""
+          }" placeholder="0.00" />
+        </label>
+        <button class="icon-button" type="button" data-remove-split aria-label="Remove split line">×</button>
+      </div>`;
+  }
+
+  function renderSplitLines(splits = []) {
+    const form = $("#transaction-form");
+    const enabled = form.elements.isSplit.checked && !form.elements.isSplit.disabled;
+    $("#split-editor").hidden = !enabled;
+    if (!enabled) {
+      $("#split-lines").innerHTML = "";
+      return;
+    }
+    const lines = splits.length
+      ? splits
+      : [
+          { amount: form.elements.amount.value || "" },
+          { amount: "" },
+        ];
+    $("#split-lines").innerHTML = lines.map(splitLineTemplate).join("");
+    updateSplitTotal();
+  }
+
+  function collectSplits() {
+    return $$(".split-line", $("#split-lines"))
+      .map((line) => ({
+        id: uid("split"),
+        categoryId: $("[data-split-category]", line).value,
+        linkedPlanId: $("[data-split-plan]", line).value,
+        amount: roundMoney($("[data-split-amount]", line).value),
+      }))
+      .filter((split) => split.amount > 0);
+  }
+
+  function updateSplitTotal() {
+    const form = $("#transaction-form");
+    const total = collectSplits().reduce((sum, split) => sum + split.amount, 0);
+    const expected = Number(form.elements.amount.value) || 0;
+    const element = $("#split-total");
+    element.textContent = `Split total ${money(total)} · transaction ${money(expected)}`;
+    element.classList.toggle("is-invalid", Math.abs(total - expected) >= 0.005);
+  }
+
+  function submitTransaction(form) {
+    const data = new FormData(form);
+    const id = String(data.get("id") || "");
+    const type = String(data.get("type"));
+    const amount = roundMoney(data.get("amount"));
+    const existing = state.transactions.find((item) => item.id === id);
+    if (amount <= 0) {
+      toast("Enter an amount greater than zero.", "error");
+      return false;
+    }
+    if (
+      type === "transfer" &&
+      data.get("accountId") &&
+      data.get("accountId") === data.get("toAccountId")
+    ) {
+      toast("A transfer needs two different accounts.", "error");
+      return false;
+    }
+
+    const useSplits = data.get("isSplit") === "on" && ["expense", "refund"].includes(type);
+    const splits = useSplits ? collectSplits() : [];
+    if (
+      useSplits &&
+      (splits.length < 2 || Math.abs(splits.reduce((sum, split) => sum + split.amount, 0) - amount) >= 0.005)
+    ) {
+      toast("Split lines must add up exactly to the transaction amount.", "error");
+      return false;
+    }
+
+    const transaction = {
+      id: id || uid("txn"),
+      periodId: existing?.periodId || activePeriod().id,
+      date: String(data.get("date")),
+      type,
+      description: String(data.get("description") || "").trim(),
+      amount,
+      accountId: String(data.get("accountId") || ""),
+      toAccountId: type === "transfer" ? String(data.get("toAccountId") || "") : "",
+      goalId: type === "transfer" ? String(data.get("goalId") || "") : "",
+      categoryId: type === "transfer" ? "" : String(data.get("categoryId") || ""),
+      linkedPlanId: type === "transfer" ? "" : String(data.get("linkedPlanId") || ""),
+      reference: String(data.get("reference") || "").trim(),
+      note: String(data.get("note") || "").trim(),
+      splits,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (type === "transfer" && (!transaction.accountId || !transaction.toAccountId)) {
+      toast("Choose both the source and destination accounts.", "error");
+      return false;
+    }
+    const goalTransferError = validateGoalTransfer(transaction);
+    if (goalTransferError) {
+      toast(goalTransferError, "error");
+      return false;
+    }
+    transaction.transferNature = type === "transfer" ? inferTransferDirection(transaction) : "";
+    transaction.goalContribution =
+      type === "transfer" && transaction.goalId
+        ? roundMoney(inferGoalTransferEffect(transaction))
+        : 0;
+    const previousTransaction = existing ? clone(existing) : null;
+
+    mutate(existing ? "Transaction updated." : "Transaction added.", () => {
+      if (existing) Object.assign(existing, transaction);
+      else state.transactions.push(transaction);
+      applyGoalTransferChange(previousTransaction, transaction);
+    });
+    return true;
+  }
+
+  function submitQuickTransaction(form) {
+    const data = new FormData(form);
+    const type = String(data.get("type"));
+    const transaction = {
+      id: uid("txn"),
+      periodId: activePeriod().id,
+      date: String(data.get("date")),
+      type,
+      description: String(data.get("description") || "").trim(),
+      amount: roundMoney(data.get("amount")),
+      accountId: String(data.get("accountId") || ""),
+      toAccountId: type === "transfer" ? String(data.get("toAccountId") || "") : "",
+      goalId: type === "transfer" ? String(data.get("goalId") || "") : "",
+      categoryId: type === "transfer" ? "" : String(data.get("categoryId") || ""),
+      linkedPlanId:
+        type === "transfer"
+          ? ""
+          : matchingPlan(data.get("description"), type === "income" ? "income" : "expense")?.id || "",
+      reference: "",
+      note: "",
+      splits: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (transaction.amount <= 0 || !transaction.description || !transaction.accountId) {
+      toast("Description, amount, and account are required.", "error");
+      return;
+    }
+    if (
+      type === "transfer" &&
+      (!transaction.toAccountId || transaction.accountId === transaction.toAccountId)
+    ) {
+      toast("Choose two different accounts for the transfer.", "error");
+      return;
+    }
+    const goalTransferError = validateGoalTransfer(transaction);
+    if (goalTransferError) {
+      toast(goalTransferError, "error");
+      return;
+    }
+    transaction.transferNature = type === "transfer" ? inferTransferDirection(transaction) : "";
+    transaction.goalContribution =
+      type === "transfer" && transaction.goalId
+        ? roundMoney(inferGoalTransferEffect(transaction))
+        : 0;
+    const date = transaction.date;
+    const accountId = transaction.accountId;
+    mutate("Transaction added.", () => {
+      state.transactions.push(transaction);
+      applyGoalTransferChange(null, transaction);
+    });
+    form.reset();
+    form.elements.date.value = date;
+    form.elements.type.value = "expense";
+    syncQuickTransactionTypeFields();
+    form.elements.accountId.value = accountId;
+    $("#quick-suggestion").textContent = "";
+    form.elements.description.focus();
+  }
+
+  function recurrenceFields(item = {}, allowIrregular = false) {
+    const schedule = itemSchedule(item);
+    const expectedDates = schedule.expectedDates
+      .map((entry) => `${entry.date}${entry.amount != null ? `, ${entry.amount}` : ""}`)
+      .join("\n");
+    return `
+      ${
+        allowIrregular
+          ? `<label>
+              <span>Schedule style</span>
+              <select name="scheduleMode">
+                <option value="recurring" ${schedule.mode === "recurring" ? "selected" : ""}>Recurring interval</option>
+                <option value="irregular" ${schedule.mode === "irregular" ? "selected" : ""}>Irregular expected dates</option>
+              </select>
+            </label>`
+          : '<input name="scheduleMode" type="hidden" value="recurring">'
+      }
+      <label class="recurring-field">
+        <span>First / next date</span>
+        <input name="anchorDate" type="date" value="${escapeHtml(schedule.anchorDate)}" required />
+      </label>
+      <label class="recurring-field">
+        <span>Repeat every</span>
+        <div class="field-pair">
+          <input name="interval" type="number" min="1" max="999" value="${schedule.interval}" required />
+          <select name="unit">
+            ${["days", "weeks", "months", "years"]
+              .map(
+                (unit) =>
+                  `<option value="${unit}" ${schedule.unit === unit ? "selected" : ""}>${unit}</option>`,
+              )
+              .join("")}
+          </select>
+        </div>
+      </label>
+      ${
+        allowIrregular
+          ? `<label class="full-width irregular-field">
+              <span>Expected dates (one per line)</span>
+              <textarea name="expectedDates" rows="5" placeholder="2026-08-01, 850.00&#10;2026-09-12, 620.00">${escapeHtml(
+                expectedDates,
+              )}</textarea>
+              <small>Use YYYY-MM-DD, amount. If amount is omitted, the default amount above is used.</small>
+            </label>`
+          : ""
+      }`;
+  }
+
+  function entityFields(type, item = null) {
+    if (type === "expense") {
+      return `
+        <div class="form-grid">
+          <label class="full-width"><span>Name</span><input name="name" type="text" value="${escapeHtml(
+            item?.name || "",
+          )}" placeholder="e.g. City Gym" required /></label>
+          <label><span>Amount each time</span><input name="amount" type="number" min="0" step="0.01" value="${
+            item?.amount ?? ""
+          }" required /></label>
+          <label><span>Default account</span><select name="accountId">${optionList(
+            state.accounts,
+            item?.accountId || "",
+            "Choose account",
+          )}</select></label>
+          <label><span>Category</span><select name="categoryId">${categoryOptions(
+            item?.categoryId || "",
+            "expense",
+          )}</select></label>
+          <label><span>Keywords</span><input name="keywords" type="text" value="${escapeHtml(
+            (item?.keywords || []).join(", "),
+          )}" placeholder="gym, membership" /></label>
+          ${recurrenceFields(item || {})}
+          <label class="checkbox-label full-width"><input name="active" type="checkbox" ${
+            item?.active === false ? "" : "checked"
+          } /><span>Include this expense in future cycles</span></label>
+        </div>`;
+    }
+    if (type === "income") {
+      return `
+        <div class="form-grid">
+          <label class="full-width"><span>Name</span><input name="name" type="text" value="${escapeHtml(
+            item?.name || "",
+          )}" placeholder="e.g. Main job" required /></label>
+          <label><span>Default amount</span><input name="amount" type="number" min="0" step="0.01" value="${
+            item?.amount ?? ""
+          }" required /></label>
+          <label><span>Deposit account</span><select name="accountId">${optionList(
+            state.accounts,
+            item?.accountId || "",
+            "Choose account",
+          )}</select></label>
+          <label><span>Category</span><select name="categoryId">${categoryOptions(
+            item?.categoryId || "cat_income",
+            "income",
+          )}</select></label>
+          <label><span>Keywords</span><input name="keywords" type="text" value="${escapeHtml(
+            (item?.keywords || []).join(", "),
+          )}" placeholder="employer, payroll" /></label>
+          ${recurrenceFields(item || {}, true)}
+          <label class="checkbox-label full-width"><input name="primary" type="checkbox" ${
+            item?.id === state.settings.primaryIncomeId ? "checked" : ""
+          } /><span>Use as my primary income source</span></label>
+          <label class="checkbox-label full-width"><input name="active" type="checkbox" ${
+            item?.active === false ? "" : "checked"
+          } /><span>Include this income in future cycles</span></label>
+        </div>`;
+    }
+    if (type === "account") {
+      const balance = item ? accountBalance(item.id) : 0;
+      return `
+        <div class="form-grid">
+          <label class="full-width"><span>Name</span><input name="name" type="text" value="${escapeHtml(
+            item?.name || "",
+          )}" placeholder="e.g. Bills" required /></label>
+          <label><span>Account type</span><select name="kind">
+            ${["transaction", "savings", "cash", "credit", "loan", "other"]
+              .map(
+                (kind) =>
+                  `<option value="${kind}" ${item?.kind === kind ? "selected" : ""}>${kind[0].toUpperCase() + kind.slice(1)}</option>`,
+              )
+              .join("")}
+          </select></label>
+          <label><span>Colour</span><input name="color" type="color" value="${escapeHtml(
+            item?.color || COLOURS[state.accounts.length % COLOURS.length],
+          )}" /></label>
+          ${
+            item
+              ? `<div class="callout full-width">Current calculated balance: ${money(
+                  balance,
+                )}. Use “Adjust balance” on the account card to record an unexplained difference.</div>`
+              : `<label class="full-width"><span>Opening balance</span><input name="openingBalance" type="number" step="0.01" value="0" required /></label>`
+          }
+        </div>`;
+    }
+    if (type === "category") {
+      return `
+        <div class="form-grid">
+          <label class="full-width"><span>Name</span><input name="name" type="text" value="${escapeHtml(
+            item?.name || "",
+          )}" required /></label>
+          <label><span>Used for</span><select name="type">
+            ${["expense", "income", "both"]
+              .map(
+                (categoryType) =>
+                  `<option value="${categoryType}" ${item?.type === categoryType ? "selected" : ""}>${categoryType[0].toUpperCase() + categoryType.slice(1)}</option>`,
+              )
+              .join("")}
+          </select></label>
+          <label><span>Colour</span><input name="color" type="color" value="${escapeHtml(
+            item?.color || COLOURS[state.categories.length % COLOURS.length],
+          )}" /></label>
+        </div>`;
+    }
+    if (type === "goal") {
+      return `
+        <div class="form-grid">
+          <label class="full-width"><span>Goal name</span><input name="name" type="text" value="${escapeHtml(
+            item?.name || "",
+          )}" placeholder="e.g. Emergency fund" required /></label>
+          <label><span>Target amount</span><input name="targetAmount" type="number" min="0" step="0.01" value="${
+            item?.targetAmount ?? ""
+          }" required /></label>
+          <label><span>Saved so far</span><input name="currentAmount" type="number" min="0" step="0.01" value="${
+            item?.currentAmount ?? 0
+          }" required /></label>
+          <label><span>Start date</span><input name="startDate" type="date" value="${escapeHtml(
+            item?.startDate || localDate(),
+          )}" required /></label>
+          <label><span>Associated account</span><select name="accountId">${optionList(
+            state.accounts,
+            item?.accountId || "",
+            "No account",
+          )}</select></label>
+          <label><span>Plan by</span><select name="mode">
+            <option value="date" ${item?.mode !== "contribution" ? "selected" : ""}>Finish date</option>
+            <option value="contribution" ${item?.mode === "contribution" ? "selected" : ""}>Amount per pay cycle</option>
+          </select></label>
+          <label class="goal-date-field"><span>Finish date</span><input name="endDate" type="date" value="${escapeHtml(
+            item?.endDate || addYears(localDate(), 1),
+          )}" /></label>
+          <label class="goal-contribution-field"><span>Amount per pay cycle</span><input name="contributionPerPeriod" type="number" min="0" step="0.01" value="${
+            item?.contributionPerPeriod ?? ""
+          }" /></label>
+          <label><span>Colour</span><input name="color" type="color" value="${escapeHtml(
+            item?.color || "#75c7a0",
+          )}" /></label>
+        </div>`;
+    }
+    return "";
+  }
+
+  function entityCollection(type) {
+    if (type === "expense") return state.expenses;
+    if (type === "income") return state.incomeSources;
+    if (type === "account") return state.accounts;
+    if (type === "category") return state.categories;
+    if (type === "goal") return state.goals;
+    return [];
+  }
+
+  function openEntityDialog(type, id = null) {
+    const collection = entityCollection(type);
+    const item = id ? collection.find((entry) => entry.id === id) : null;
+    const labels = {
+      expense: ["Scheduled outflow", "recurring expense"],
+      income: ["Expected earnings", "income source"],
+      account: ["Money container", "account"],
+      category: ["Tracking label", "category"],
+      goal: ["Future plan", "savings goal"],
+    };
+    const [eyebrow, noun] = labels[type];
+    const form = $("#entity-form");
+    form.elements.entityType.value = type;
+    form.elements.id.value = item?.id || "";
+    $("#entity-eyebrow").textContent = eyebrow;
+    $("#entity-dialog-title").textContent = `${item ? "Edit" : "Add"} ${noun}`;
+    $("#entity-form-fields").innerHTML = entityFields(type, item);
+    $("#delete-entity").hidden = !item;
+    syncEntityConditionalFields();
+    showDialog($("#entity-dialog"));
+    setTimeout(() => $("#entity-form-fields input:not([type='hidden'])")?.focus(), 20);
+  }
+
+  function syncEntityConditionalFields() {
+    const form = $("#entity-form");
+    const type = form.elements.entityType.value;
+    if (type === "income") {
+      const irregular = form.elements.scheduleMode?.value === "irregular";
+      $$(".recurring-field", form).forEach((field) => (field.hidden = irregular));
+      $$(".irregular-field", form).forEach((field) => (field.hidden = !irregular));
+      if (form.elements.anchorDate) form.elements.anchorDate.required = !irregular;
+    }
+    if (type === "goal") {
+      const contribution = form.elements.mode?.value === "contribution";
+      $$(".goal-date-field", form).forEach((field) => (field.hidden = contribution));
+      $$(".goal-contribution-field", form).forEach((field) => (field.hidden = !contribution));
+      if (form.elements.endDate) form.elements.endDate.required = !contribution;
+      if (form.elements.contributionPerPeriod) {
+        form.elements.contributionPerPeriod.required = contribution;
+      }
+    }
+  }
+
+  function parseExpectedDates(text, defaultAmount) {
+    return String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [date, amount] = line.split(",").map((part) => part.trim());
+        return {
+          date,
+          amount: amount === undefined || amount === "" ? Number(defaultAmount) : roundMoney(amount),
+        };
+      })
+      .filter((entry) => /^\d{4}-\d{2}-\d{2}$/.test(entry.date) && Number.isFinite(entry.amount));
+  }
+
+  function submitEntity(form) {
+    const data = new FormData(form);
+    const type = String(data.get("entityType"));
+    const id = String(data.get("id") || "");
+    const collection = entityCollection(type);
+    const existing = id ? collection.find((entry) => entry.id === id) : null;
+    const name = String(data.get("name") || "").trim();
+    if (!name) {
+      toast("A name is required.", "error");
+      return false;
+    }
+    if (type === "category" && name.toLocaleLowerCase() === "uncategorised") {
+      toast("Uncategorised is built in and does not need to be created.", "error");
+      return false;
+    }
+
+    if (type === "expense" || type === "income") {
+      const amount = roundMoney(data.get("amount"));
+      const mode = type === "income" ? String(data.get("scheduleMode") || "recurring") : "recurring";
+      const schedule = {
+        mode,
+        anchorDate: String(data.get("anchorDate") || localDate()),
+        interval: Math.max(1, Number(data.get("interval")) || 1),
+        unit: String(data.get("unit") || "months"),
+        expectedDates:
+          mode === "irregular" ? parseExpectedDates(data.get("expectedDates"), amount) : [],
+      };
+      const item = {
+        id: existing?.id || uid(type),
+        name,
+        amount,
+        accountId: String(data.get("accountId") || ""),
+        categoryId: String(data.get("categoryId") || ""),
+        keywords: String(data.get("keywords") || "")
+          .split(",")
+          .map((keyword) => keyword.trim())
+          .filter(Boolean),
+        schedule,
+        active: data.get("active") === "on",
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      mutate(`${type === "income" ? "Income source" : "Expense"} saved.`, () => {
+        if (existing) Object.assign(existing, item);
+        else collection.push(item);
+        if (type === "income" && data.get("primary") === "on") {
+          state.settings.primaryIncomeId = item.id;
+        } else if (
+          type === "income" &&
+          existing?.id === state.settings.primaryIncomeId &&
+          data.get("primary") !== "on"
+        ) {
+          state.settings.primaryIncomeId = "";
+        }
+      });
+      return true;
+    }
+
+    if (type === "account") {
+      const account = {
+        id: existing?.id || uid("acct"),
+        name,
+        kind: String(data.get("kind") || "transaction"),
+        color: String(data.get("color") || "#8eadcf"),
+      };
+      mutate("Account saved.", () => {
+        if (existing) Object.assign(existing, account);
+        else {
+          state.accounts.push(account);
+          activePeriod().openingBalances[account.id] = roundMoney(data.get("openingBalance"));
+        }
+      });
+      return true;
+    }
+
+    if (type === "category") {
+      const category = {
+        id: existing?.id || uid("cat"),
+        name,
+        type: String(data.get("type") || "expense"),
+        color: String(data.get("color") || "#8eadcf"),
+      };
+      mutate("Category saved.", () => {
+        if (existing) Object.assign(existing, category);
+        else state.categories.push(category);
+      });
+      return true;
+    }
+
+    if (type === "goal") {
+      const startingAmount = existing
+        ? Number(existing.startingAmount || existing.currentAmount || 0)
+        : roundMoney(data.get("currentAmount"));
+      const goal = {
+        id: existing?.id || uid("goal"),
+        name,
+        targetAmount: roundMoney(data.get("targetAmount")),
+        currentAmount: roundMoney(data.get("currentAmount")),
+        startingAmount,
+        startDate: String(data.get("startDate") || localDate()),
+        accountId: String(data.get("accountId") || ""),
+        mode: String(data.get("mode") || "date"),
+        endDate: String(data.get("endDate") || ""),
+        contributionPerPeriod: roundMoney(data.get("contributionPerPeriod")),
+        color: String(data.get("color") || "#75c7a0"),
+        updatedAt: new Date().toISOString(),
+      };
+      mutate("Savings goal saved.", () => {
+        if (existing) Object.assign(existing, goal);
+        else state.goals.push(goal);
+        selectedGoalId = goal.id;
+      });
+      return true;
+    }
+    return false;
+  }
+
+  function deleteEntity() {
+    const form = $("#entity-form");
+    const type = form.elements.entityType.value;
+    const id = form.elements.id.value;
+    const collection = entityCollection(type);
+    const item = collection.find((entry) => entry.id === id);
+    if (!item) return;
+
+    if (type === "account") {
+      const referenced =
+        state.transactions.some(
+          (transaction) => transaction.accountId === id || transaction.toAccountId === id,
+        ) ||
+        state.expenses.some((expense) => expense.accountId === id) ||
+        state.incomeSources.some((income) => income.accountId === id) ||
+        state.goals.some((goal) => goal.accountId === id);
+      if (referenced) {
+        toast("This account is still used by transactions or planned items.", "error");
+        return;
+      }
+    }
+    if (type === "category" && id === UNCATEGORISED_CATEGORY_ID) {
+      toast("Uncategorised is the fallback for records whose category is removed.", "error");
+      return;
+    }
+    const categoryWarning =
+      type === "category" ? " Existing records will be moved to Uncategorised." : "";
+    if (!window.confirm(`Delete “${item.name}”?${categoryWarning} This cannot be undone.`)) return;
+
+    mutate(`${item.name} deleted.`, () => {
+      const index = collection.findIndex((entry) => entry.id === id);
+      collection.splice(index, 1);
+      if (type === "expense") {
+        state.transactions.forEach((transaction) => {
+          if (transaction.linkedPlanId === id) transaction.linkedPlanId = "";
+          transaction.splits?.forEach((split) => {
+            if (split.linkedPlanId === id) split.linkedPlanId = "";
+          });
+        });
+      }
+      if (type === "income") {
+        state.transactions.forEach((transaction) => {
+          if (transaction.linkedPlanId === id) transaction.linkedPlanId = "";
+        });
+        if (state.settings.primaryIncomeId === id) state.settings.primaryIncomeId = "";
+      }
+      if (type === "category") {
+        reassignCategoryReferences(id);
+      }
+      if (type === "goal") {
+        state.transactions.forEach((transaction) => {
+          if (transaction.goalId === id) transaction.goalId = "";
+        });
+        if (selectedGoalId === id) selectedGoalId = null;
+      }
+    });
+    closeDialog($("#entity-dialog"));
+  }
+
+  function setAdjustmentMessage(message = "") {
+    const element = $("#adjustment-message");
+    const input = $("#adjustment-form").elements.reportedBalance;
+    element.textContent = message;
+    element.hidden = !message;
+    input.setAttribute("aria-invalid", String(Boolean(message)));
+  }
+
+  function openAdjustmentDialog(accountId) {
+    const account = accountById(accountId);
+    if (!account) return;
+    const balance = accountBalance(accountId);
+    const form = $("#adjustment-form");
+    form.reset();
+    $$(".toast", $("#toast-region")).forEach((item) => item.remove());
+    setAdjustmentMessage();
+    form.elements.accountId.value = accountId;
+    form.elements.reportedBalance.value = balance.toFixed(2);
+    form.elements.date.value = localDate();
+    $("#adjustment-copy").textContent = `${account.name} currently calculates to ${money(
+      balance,
+    )}. Enter the balance shown by the bank or account.`;
+    showDialog($("#adjustment-dialog"));
+    setTimeout(() => form.elements.reportedBalance.select(), 20);
+  }
+
+  function resolveAccountAdjustments(accountId) {
+    const account = accountById(accountId);
+    const pending = state.adjustments.filter(
+      (adjustment) =>
+        adjustment.periodId === activePeriod().id &&
+        adjustment.accountId === accountId &&
+        adjustment.resolved !== true,
+    );
+    if (!account || !pending.length) return;
+    const currentBalance = accountBalance(accountId);
+    const pendingDelta = pending.reduce(
+      (sum, adjustment) => sum + Number(adjustment.delta || 0),
+      0,
+    );
+    const balanceAfterResolve = roundMoney(currentBalance - pendingDelta);
+    if (
+      !window.confirm(
+        `Resolve the unexplained difference for ${account.name}? Its calculated balance will change from ${money(
+          currentBalance,
+        )} to ${money(
+          balanceAfterResolve,
+        )}. Only continue after recording the missing transaction(s); the temporary correction will be removed.`,
+      )
+    ) {
+      return;
+    }
+    mutate(`${account.name} difference resolved. Balance is now ${money(balanceAfterResolve)}.`, () => {
+      pending.forEach((adjustment) => {
+        adjustment.resolved = true;
+        adjustment.resolvedAt = new Date().toISOString();
+      });
+    });
+  }
+
+  function submitAdjustment(form) {
+    const data = new FormData(form);
+    const result = recordBalanceDifference({
+      accountId: data.get("accountId"),
+      reportedBalance: data.get("reportedBalance"),
+      date: data.get("date"),
+      note: data.get("note"),
+    });
+    if (result.status === "invalid") {
+      setAdjustmentMessage("Enter a valid reported balance.");
+      form.elements.reportedBalance.focus();
+      return false;
+    }
+    if (result.status === "matches") {
+      setAdjustmentMessage(
+        `This account already calculates to ${money(
+          result.expected,
+        )}. Enter the balance shown by the bank only if it is different.`,
+      );
+      form.elements.reportedBalance.focus();
+      form.elements.reportedBalance.select();
+      return false;
+    }
+    state = normalizeState(state);
+    persistState();
+    renderAll();
+    toast(
+      result.status === "restored"
+        ? "The previously resolved balance difference was restored."
+        : "Balance difference recorded.",
+    );
+    return true;
+  }
+
+  function archiveActiveCycle() {
+    const period = activePeriod();
+    if (
+      !window.confirm(
+        `Archive ${formatDate(period.startDate)} – ${formatDate(
+          period.endDate,
+        )} and start the next pay cycle?`,
+      )
+    ) {
+      return;
+    }
+    mutate("Pay cycle archived. A fresh cycle is ready.", () => {
+      period.archiveSummary = summaryForPeriod(period);
+      period.archiveOccurrences = {
+        income: state.incomeSources.flatMap((item) =>
+          scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
+            ...occurrence,
+            itemId: item.id,
+            name: item.name,
+          })),
+        ),
+        expenses: state.expenses.flatMap((item) =>
+          scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
+            ...occurrence,
+            itemId: item.id,
+            name: item.name,
+          })),
+        ),
+      };
+      period.closingBalances = Object.fromEntries(
+        state.accounts.map((account) => [account.id, accountBalance(account.id, period)]),
+      );
+      period.status = "archived";
+      period.archivedAt = new Date().toISOString();
+      const nextStart = addDays(period.endDate, 1);
+      const next = {
+        id: uid("period"),
+        startDate: nextStart,
+        endDate: addDays(nextStart, payIntervalDays() - 1),
+        status: "active",
+        openingBalances: clone(period.closingBalances),
+        createdAt: new Date().toISOString(),
+      };
+      state.periods.push(next);
+      state.metadata.activePeriodId = next.id;
+    });
+  }
+
+  function downloadJson(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function validateImportedState(candidate) {
+    if (!candidate || typeof candidate !== "object") throw new Error("The JSON root must be an object.");
+    if (!Array.isArray(candidate.accounts) || !Array.isArray(candidate.transactions)) {
+      throw new Error("This does not look like a Canopy data file.");
+    }
+    if (Number(candidate.schemaVersion || 0) > SCHEMA_VERSION) {
+      throw new Error("This data file was created by a newer Canopy version.");
+    }
+    return normalizeState(candidate);
+  }
+
+  function scheduleBackupRequirementCheck() {
+    clearTimeout(backupCheckTimer);
+    backupCheckTimer = null;
+    if (backupIsOverdue()) return;
+    const dueAt = backupDueAt();
+    const delay = Math.min(Math.max(dueAt - Date.now(), 1000), 2147483647);
+    backupCheckTimer = setTimeout(() => {
+      checkBackupRequirement();
+      scheduleBackupRequirementCheck();
+    }, delay);
+  }
+
+  function checkBackupRequirement() {
+    const dialog = $("#backup-required-dialog");
+    if (!dialog) return;
+    backupGateActive = backupIsOverdue();
+    $("#backup-required-filename").textContent = backupFilename();
+    if (backupGateActive && !dialog.open) {
+      showDialog(dialog);
+    } else if (!backupGateActive && dialog.open) {
+      closeDialog(dialog);
+    }
+    if ($("#settings-form")) renderSettings();
+  }
+
+  function exportDataBackup() {
+    const exportedAt = new Date().toISOString();
+    state.metadata.lastExternalBackupAt = exportedAt;
+    state.metadata.backupWindowStartedAt = exportedAt;
+    persistState();
+    downloadJson(state, backupFilename());
+    backupGateActive = false;
+    const dialog = $("#backup-required-dialog");
+    if (dialog?.open) closeDialog(dialog);
+    renderSettings();
+    scheduleBackupRequirementCheck();
+    toast("External JSON backup download started.");
+  }
+
+  function switchView(view) {
+    if (!document.getElementById(`view-${view}`)) return;
+    currentView = view;
+    $$(".view").forEach((panel) => panel.classList.toggle("is-active", panel.id === `view-${view}`));
+    $$(".nav-item[data-view]").forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.view === view);
+    });
+    document.body.classList.remove("nav-open");
+    $("#mobile-menu").setAttribute("aria-expanded", "false");
+    if (view === "insights") renderInsights();
+    if (view === "goals") requestAnimationFrame(renderGoalDetail);
+    $("#main-content").focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function deleteTransaction(transactionId) {
+    const transaction = state.transactions.find((item) => item.id === transactionId);
+    if (!transaction) return;
+    if (!window.confirm(`Delete “${transaction.description}”?`)) return;
+    mutate("Transaction deleted.", () => {
+      applyGoalTransferChange(transaction, null);
+      state.transactions = state.transactions.filter((item) => item.id !== transactionId);
+    });
+    closeDialog($("#transaction-dialog"));
+  }
+
+  function bindEvents() {
+    document.addEventListener("click", (event) => {
+      const nav = event.target.closest("[data-view]");
+      if (nav) {
+        switchView(nav.dataset.view);
+        return;
+      }
+      const go = event.target.closest("[data-go-view]");
+      if (go) {
+        switchView(go.dataset.goView);
+        return;
+      }
+      const tab = event.target.closest("[data-plan-tab]");
+      if (tab) {
+        currentPlanTab = tab.dataset.planTab;
+        renderPlan();
+        return;
+      }
+      const openEntity = event.target.closest("[data-open-entity]");
+      if (openEntity) {
+        openEntityDialog(openEntity.dataset.openEntity);
+        return;
+      }
+      const editEntity = event.target.closest("[data-edit-entity]");
+      if (editEntity) {
+        openEntityDialog(editEntity.dataset.editEntity, editEntity.dataset.entityId);
+        return;
+      }
+      const adjust = event.target.closest("[data-adjust-account]");
+      if (adjust) {
+        openAdjustmentDialog(adjust.dataset.adjustAccount);
+        return;
+      }
+      const resolveAdjustment = event.target.closest("[data-resolve-account]");
+      if (resolveAdjustment) {
+        resolveAccountAdjustments(resolveAdjustment.dataset.resolveAccount);
+        return;
+      }
+      const editTransaction = event.target.closest("[data-edit-transaction]");
+      if (editTransaction) {
+        openTransactionDialog(editTransaction.dataset.editTransaction);
+        return;
+      }
+      const goalCard = event.target.closest("[data-select-goal]");
+      if (goalCard) {
+        selectedGoalId = goalCard.dataset.selectGoal;
+        renderGoals();
+        return;
+      }
+      const progressButton = event.target.closest("[data-add-goal-progress]");
+      if (progressButton) {
+        const goal = goalById(progressButton.dataset.addGoalProgress);
+        if (!goal) return;
+        const answer = window.prompt(
+          `What is the reconciled amount saved toward “${goal.name}” now? Linked transfers are already included.`,
+          Number(goal.currentAmount || 0).toFixed(2),
+        );
+        if (answer === null) return;
+        const amount = roundMoney(answer);
+        if (!Number.isFinite(amount) || amount < 0) {
+          toast("Enter a valid non-negative amount.", "error");
+          return;
+        }
+        mutate("Goal balance reconciled.", () => {
+          goal.currentAmount = amount;
+          goal.updatedAt = new Date().toISOString();
+        });
+        return;
+      }
+      const close = event.target.closest("[data-close-dialog]");
+      if (close) {
+        closeDialog(close.closest("dialog"));
+      }
+    });
+
+    document.addEventListener("keydown", (event) => {
+      const goalCard = event.target.closest?.("[data-select-goal]");
+      if (goalCard && ["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        selectedGoalId = goalCard.dataset.selectGoal;
+        renderGoals();
+        return;
+      }
+      if (event.key === "Escape") {
+        $$("dialog[open]:not(#backup-required-dialog)").forEach(closeDialog);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        const dialog = event.target.closest?.("dialog");
+        const form = dialog?.querySelector("form");
+        if (form) {
+          event.preventDefault();
+          form.requestSubmit();
+        }
+        return;
+      }
+      const editable = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+      if (!editable && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        openTransactionDialog();
+      }
+      if (!editable && event.key === "/") {
+        event.preventDefault();
+        switchView("transactions");
+        $("#transaction-search").focus();
+      }
+    });
+
+    $("#mobile-menu").addEventListener("click", () => {
+      const open = document.body.classList.toggle("nav-open");
+      $("#mobile-menu").setAttribute("aria-expanded", String(open));
+    });
+
+    $("#sidebar-collapse").addEventListener("click", () => {
+      state.settings.sidebarCollapsed = state.settings.sidebarCollapsed !== true;
+      persistState();
+      applySidebarState();
+    });
+
+    $("#global-add-transaction").addEventListener("click", () => openTransactionDialog());
+    $("#page-add-transaction").addEventListener("click", () => openTransactionDialog());
+    $("#archive-cycle-button").addEventListener("click", archiveActiveCycle);
+
+    $("#theme-cycle").addEventListener("click", () => {
+      const index = THEME_ORDER.indexOf(state.settings.theme);
+      mutate("Theme changed.", () => {
+        state.settings.theme = THEME_ORDER[(index + 1) % THEME_ORDER.length];
+      });
+    });
+
+    $("#quick-transaction-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitQuickTransaction(event.currentTarget);
+    });
+    $("#quick-transaction-form").addEventListener("focusin", (event) => {
+      panQuickEntryToFocusedControl(event.target);
+    });
+    $("#quick-transaction-form").elements.type.addEventListener("change", syncQuickTransactionTypeFields);
+    $("#quick-transaction-form").elements.goalId.addEventListener("change", (event) => {
+      applySelectedGoalAccount(event.currentTarget.form);
+    });
+    $("#quick-transaction-form").elements.description.addEventListener("input", (event) => {
+      applyPlanSuggestion(
+        $("#quick-transaction-form"),
+        event.target.value,
+        $("#quick-transaction-form").elements.type.value,
+        $("#quick-suggestion"),
+      );
+    });
+
+    $("#transaction-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (submitTransaction(event.currentTarget)) closeDialog($("#transaction-dialog"));
+    });
+    $("#transaction-type").addEventListener("change", syncTransactionTypeFields);
+    $("#transaction-form").elements.goalId.addEventListener("change", (event) => {
+      applySelectedGoalAccount(event.currentTarget.form);
+    });
+    $("#transaction-description").addEventListener("input", (event) => {
+      applyPlanSuggestion(
+        $("#transaction-form"),
+        event.target.value,
+        $("#transaction-form").elements.type.value,
+        $("#transaction-suggestion"),
+      );
+    });
+    $("#transaction-form").elements.isSplit.addEventListener("change", () => renderSplitLines());
+    $("#transaction-form").elements.amount.addEventListener("input", updateSplitTotal);
+    $("#add-split-line").addEventListener("click", () => {
+      $("#split-lines").insertAdjacentHTML("beforeend", splitLineTemplate());
+      updateSplitTotal();
+    });
+    $("#split-lines").addEventListener("input", updateSplitTotal);
+    $("#split-lines").addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-remove-split]");
+      if (remove) {
+        remove.closest(".split-line").remove();
+        updateSplitTotal();
+      }
+    });
+    $("#delete-transaction").addEventListener("click", () => {
+      deleteTransaction($("#transaction-form").elements.id.value);
+    });
+
+    $("#entity-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (submitEntity(event.currentTarget)) closeDialog($("#entity-dialog"));
+    });
+    $("#entity-form-fields").addEventListener("change", (event) => {
+      if (["scheduleMode", "mode"].includes(event.target.name)) syncEntityConditionalFields();
+    });
+    $("#delete-entity").addEventListener("click", deleteEntity);
+
+    $("#adjustment-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (submitAdjustment(event.currentTarget)) closeDialog($("#adjustment-dialog"));
+    });
+    $("#adjustment-form").addEventListener("input", () => setAdjustmentMessage());
+
+    $("#transaction-search").addEventListener("input", renderTransactions);
+    $("#transaction-type-filter").addEventListener("change", renderTransactions);
+    $("#insight-grouping").addEventListener("change", renderInsights);
+
+    $("#settings-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      mutate("Settings saved.", () => {
+        state.settings.currency = String(data.get("currency"));
+        state.settings.payIntervalValue = Math.max(1, Number(data.get("payIntervalValue")) || 1);
+        state.settings.payIntervalUnit = String(data.get("payIntervalUnit"));
+        state.settings.primaryIncomeId = String(data.get("primaryIncomeId") || "");
+        const period = activePeriod();
+        period.startDate = String(data.get("periodStart"));
+        period.endDate = addDays(period.startDate, payIntervalDays() - 1);
+      });
+    });
+    $$(".theme-choices [data-theme-choice]").forEach((button) => {
+      button.addEventListener("click", () => {
+        mutate("Theme changed.", () => {
+          state.settings.theme = button.dataset.themeChoice;
+        });
+      });
+    });
+
+    $("#export-data").addEventListener("click", exportDataBackup);
+    $("#required-export-data").addEventListener("click", exportDataBackup);
+    $("#backup-required-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+    });
+    $("#backup-required-dialog").addEventListener("close", () => {
+      if (backupGateActive) {
+        requestAnimationFrame(() => showDialog($("#backup-required-dialog")));
+      }
+    });
+    $("#import-data").addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+      try {
+        const imported = validateImportedState(JSON.parse(await file.text()));
+        if (
+          !window.confirm(
+            "Replace the current budget with this file? Export the current budget first if you may need it again.",
+          )
+        ) {
+          return;
+        }
+        state = imported;
+        const importedAt = new Date().toISOString();
+        state.metadata.lastExternalBackupAt = importedAt;
+        state.metadata.backupWindowStartedAt = importedAt;
+        selectedGoalId = state.goals[0]?.id || null;
+        persistState();
+        renderAll();
+        checkBackupRequirement();
+        scheduleBackupRequirementCheck();
+        toast("JSON data imported.");
+      } catch (error) {
+        console.error(error);
+        toast(error.message || "The JSON file could not be imported.", "error");
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        checkBackupRequirement();
+        scheduleBackupRequirementCheck();
+      }
+    });
+    window.addEventListener("beforeunload", (event) => {
+      if (!backupIsOverdue()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+
+    window.addEventListener("resize", () => {
+      clearTimeout(window.__canopyResizeTimer);
+      window.__canopyResizeTimer = setTimeout(() => {
+        if (currentView === "insights") renderInsights();
+        if (currentView === "goals") renderGoalDetail();
+      }, 150);
+    });
+  }
+
+  async function initialise() {
+    state.metadata.lastOpenedDate = localDate();
+    persistState();
+
+    bindEvents();
+    $("#quick-transaction-form").elements.date.value = localDate();
+    renderAll();
+    checkBackupRequirement();
+    scheduleBackupRequirementCheck();
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      initialState,
+      normalizeState,
+      scheduleOccurrences,
+      scheduleText,
+      summaryForPeriod,
+      accountBalance,
+      transactionAllocations,
+      transferDirection,
+      transferStats,
+      goalTransferEffect,
+      applyGoalTransferChange,
+      goalProgressDate,
+      recordBalanceDifference,
+      categoryOptions,
+      categoryTotalsForPeriod,
+      uncategorisedActivity,
+      manageableCategories,
+      reassignCategoryReferences,
+      plannedOccurrenceProgress,
+      matchingPlan,
+      addDays,
+      addMonths,
+      addYears,
+      daysBetween,
+      backupFilename,
+      backupIsOverdue,
+      setStateForTest(nextState) {
+        state = normalizeState(nextState);
+      },
+      getStateForTest() {
+        return state;
+      },
+    };
+  } else {
+    initialise().catch((error) => {
+      console.error(error);
+      toast("Canopy could not finish starting.", "error");
+    });
+  }
+})();

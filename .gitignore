@@ -1,0 +1,14 @@
+# Personal Canopy data
+budget-data.json
+budget-backup-*.json
+canopy-backup_*.json
+data/*.json
+data/backups/*.json
+backups/*.json
+
+# Local inspection and test scratch space
+.tmp-workbook-inspect/
+
+# Operating system files
+.DS_Store
+Thumbs.db

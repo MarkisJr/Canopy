@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Canopy is a private, browser-only budget manager that works without a web server."
+    />
+    <title>Canopy · Local budget manager</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">C</div>
+          <div class="brand-copy">
+            <strong>Canopy</strong>
+            <span>your money, in view</span>
+          </div>
+        </div>
+
+        <nav class="primary-nav">
+          <button class="nav-item is-active" type="button" data-view="dashboard" title="Overview">
+            <span class="nav-icon" aria-hidden="true">⌂</span>
+            <span class="nav-label">Overview</span>
+          </button>
+          <button class="nav-item" type="button" data-view="transactions" title="Transactions">
+            <span class="nav-icon" aria-hidden="true">↕</span>
+            <span class="nav-label">Transactions</span>
+          </button>
+          <button class="nav-item" type="button" data-view="plan" title="Plan">
+            <span class="nav-icon" aria-hidden="true">◫</span>
+            <span class="nav-label">Plan</span>
+          </button>
+          <button class="nav-item" type="button" data-view="goals" title="Goals">
+            <span class="nav-icon" aria-hidden="true">◎</span>
+            <span class="nav-label">Goals</span>
+          </button>
+          <button class="nav-item" type="button" data-view="insights" title="Insights">
+            <span class="nav-icon" aria-hidden="true">⌁</span>
+            <span class="nav-label">Insights</span>
+          </button>
+          <button class="nav-item" type="button" data-view="archive" title="Archive">
+            <span class="nav-icon archive-box-icon" aria-hidden="true"></span>
+            <span class="nav-label">Archive</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <button class="nav-item" type="button" data-view="settings" title="Settings">
+            <span class="nav-icon" aria-hidden="true">⚙</span>
+            <span class="nav-label">Settings</span>
+          </button>
+          <button
+            class="nav-item sidebar-collapse"
+            id="sidebar-collapse"
+            type="button"
+            title="Collapse navigation"
+            aria-label="Collapse navigation"
+            aria-expanded="true"
+          >
+            <span class="nav-icon collapse-icon" aria-hidden="true">‹</span>
+            <span class="nav-label">Collapse</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button
+            class="mobile-menu"
+            id="mobile-menu"
+            type="button"
+            aria-label="Open navigation"
+            aria-expanded="false"
+          >
+            ☰
+          </button>
+          <div class="period-switcher">
+            <span>Current pay cycle</span>
+            <strong id="period-label">—</strong>
+          </div>
+          <div class="topbar-actions">
+            <button class="quiet-button" id="theme-cycle" type="button" title="Change theme">
+              <span aria-hidden="true">◐</span>
+              <span class="hide-small">Theme</span>
+            </button>
+            <button class="primary-button" id="global-add-transaction" type="button">
+              <span aria-hidden="true">＋</span>
+              <span class="hide-small">Add transaction</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="theme-decorations" aria-hidden="true">
+          <span class="theme-decoration decor-top"></span>
+          <span class="theme-decoration decor-side"></span>
+          <span class="theme-decoration decor-bottom"></span>
+        </div>
+
+        <main id="main-content" tabindex="-1">
+          <section class="view is-active" id="view-dashboard" data-title="Overview">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow" id="dashboard-eyebrow">Today</span>
+                <h1 id="dashboard-greeting">Your money at a glance</h1>
+                <p id="dashboard-subtitle">See what is due, what has moved, and what is still yours.</p>
+              </div>
+              <button class="quiet-button" id="archive-cycle-button" type="button">
+                Close &amp; archive cycle
+              </button>
+            </div>
+
+            <div class="empty-banner" id="onboarding-banner" hidden>
+              <div>
+                <span class="eyebrow">A clean start</span>
+                <h2>Set up your first pay cycle</h2>
+                <p>
+                  Add an account, an income source, and the expenses you expect. Canopy will place
+                  each recurring item in the cycle when it is actually due.
+                </p>
+              </div>
+              <button class="primary-button" type="button" data-go-view="plan">Build my plan</button>
+            </div>
+
+            <div class="uncategorised-alert" id="dashboard-uncategorised-alert" hidden></div>
+            <div class="score-grid" id="score-grid" aria-label="Budget summary"></div>
+
+            <div class="dashboard-grid overview-primary-grid">
+              <section class="panel cycle-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Cycle pace</span>
+                    <h2>Where this pay is going</h2>
+                  </div>
+                  <span class="pill" id="cycle-days-left">—</span>
+                </div>
+                <div class="pace-visual">
+                  <div class="pace-ring" id="pace-ring">
+                    <div>
+                      <strong id="safe-to-spend">$0</strong>
+                      <span>unallocated</span>
+                    </div>
+                  </div>
+                  <div class="pace-legend" id="pace-legend"></div>
+                </div>
+              </section>
+
+              <section class="panel upcoming-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Coming up</span>
+                    <h2>Scheduled in this cycle</h2>
+                  </div>
+                  <button class="text-button" type="button" data-go-view="plan">Edit plan</button>
+                </div>
+                <div class="stack-list" id="upcoming-list"></div>
+              </section>
+            </div>
+
+            <div class="dashboard-grid lower-grid">
+              <section class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Accounts</span>
+                    <h2>Balances</h2>
+                  </div>
+                  <button class="text-button" type="button" data-go-view="plan">Manage</button>
+                </div>
+                <div class="account-list" id="account-list"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Latest activity</span>
+                    <h2>Recent transactions</h2>
+                  </div>
+                  <button class="text-button" type="button" data-go-view="transactions">
+                    See all
+                  </button>
+                </div>
+                <div class="stack-list" id="recent-transactions"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view" id="view-transactions" data-title="Transactions">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Fast capture</span>
+                <h1>Transactions</h1>
+                <p>Type a familiar description and Canopy will suggest its account and category.</p>
+              </div>
+              <button class="primary-button" id="page-add-transaction" type="button">
+                ＋ Add transaction
+              </button>
+            </div>
+
+            <section class="panel quick-entry-panel">
+              <div class="panel-heading compact">
+                <div>
+                  <span class="eyebrow">Quick row</span>
+                  <h2>Excel-speed entry</h2>
+                </div>
+                <span class="keyboard-hint">Tab or scroll → · Enter to save · N for full entry</span>
+              </div>
+              <div
+                class="quick-entry-scroll"
+                id="quick-entry-scroll"
+                aria-label="Horizontally scrollable quick transaction entry"
+              >
+                <form class="quick-entry" id="quick-transaction-form">
+                  <label>
+                    <span>Date</span>
+                    <input name="date" type="date" required />
+                  </label>
+                  <label class="wide-field">
+                    <span>Description</span>
+                    <input
+                      name="description"
+                      type="text"
+                      autocomplete="off"
+                      placeholder="e.g. City Gym"
+                      required
+                    />
+                  </label>
+                  <label>
+                    <span>Type</span>
+                    <select name="type">
+                      <option value="expense">Expense</option>
+                      <option value="income">Income</option>
+                      <option value="refund">Refund</option>
+                      <option value="transfer">Transfer</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Amount</span>
+                    <input name="amount" type="number" min="0" step="0.01" placeholder="0.00" required />
+                  </label>
+                  <label>
+                    <span id="quick-account-label">Account</span>
+                    <select name="accountId" required></select>
+                  </label>
+                  <label class="quick-transfer-only" hidden>
+                    <span>To account</span>
+                    <select name="toAccountId"></select>
+                  </label>
+                  <label class="quick-transfer-only" hidden>
+                    <span>Savings goal</span>
+                    <select name="goalId"></select>
+                  </label>
+                  <label class="quick-non-transfer">
+                    <span>Category</span>
+                    <select name="categoryId"></select>
+                  </label>
+                  <button class="primary-button quick-save" type="submit">Add</button>
+                </form>
+              </div>
+              <div class="quick-scroll-guide" aria-hidden="true">
+                <span>Horizontal entry row</span>
+                <i></i>
+                <span>More fields and Add →</span>
+              </div>
+              <p class="suggestion-line" id="quick-suggestion" aria-live="polite"></p>
+            </section>
+
+            <section class="panel transfer-overview" aria-labelledby="transfer-overview-title">
+              <div class="panel-heading compact">
+                <div>
+                  <span class="eyebrow">This pay cycle</span>
+                  <h2 id="transfer-overview-title">Transfer pulse</h2>
+                </div>
+                <span class="pill" id="transfer-count">0 transfers</span>
+              </div>
+              <div class="transfer-metrics" id="transfer-metrics"></div>
+              <p class="transfer-message" id="transfer-message"></p>
+            </section>
+
+            <section class="panel table-panel">
+              <div class="table-toolbar">
+                <label class="search-field">
+                  <span class="sr-only">Search transactions</span>
+                  <input id="transaction-search" type="search" placeholder="Search transactions…" />
+                </label>
+                <label>
+                  <span class="sr-only">Filter by transaction type</span>
+                  <select id="transaction-type-filter">
+                    <option value="all">All types</option>
+                    <option value="expense">Expenses</option>
+                    <option value="income">Income</option>
+                    <option value="refund">Refunds</option>
+                    <option value="transfer">Transfers</option>
+                  </select>
+                </label>
+                <span class="toolbar-count" id="transaction-count"></span>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Description</th>
+                      <th>Account</th>
+                      <th>Category / plan</th>
+                      <th>Type</th>
+                      <th class="numeric">Amount</th>
+                      <th><span class="sr-only">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="transaction-table-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section class="view" id="view-plan" data-title="Plan">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Your rhythm</span>
+                <h1>Plan</h1>
+                <p>Schedule money for the dates it really arrives or leaves—not an averaged fortnight.</p>
+              </div>
+            </div>
+
+            <div class="tab-bar" role="tablist" aria-label="Plan sections">
+              <button class="tab-button is-active" type="button" data-plan-tab="expenses">
+                Recurring expenses
+              </button>
+              <button class="tab-button" type="button" data-plan-tab="income">Income sources</button>
+              <button class="tab-button" type="button" data-plan-tab="accounts">Accounts</button>
+              <button class="tab-button" type="button" data-plan-tab="categories">Categories</button>
+            </div>
+
+            <div class="plan-tab is-active" id="plan-tab-expenses">
+              <div class="section-action-row">
+                <div>
+                  <h2>Recurring expenses</h2>
+                  <p>Only occurrences due inside the active cycle count toward its budget.</p>
+                </div>
+                <button class="primary-button" type="button" data-open-entity="expense">
+                  ＋ Add expense
+                </button>
+              </div>
+              <div class="card-grid" id="expense-card-grid"></div>
+            </div>
+
+            <div class="plan-tab" id="plan-tab-income">
+              <div class="section-action-row">
+                <div>
+                  <h2>Income sources</h2>
+                  <p>Use recurring schedules or add expected dates for irregular work.</p>
+                </div>
+                <button class="primary-button" type="button" data-open-entity="income">
+                  ＋ Add income
+                </button>
+              </div>
+              <div class="card-grid" id="income-card-grid"></div>
+            </div>
+
+            <div class="plan-tab" id="plan-tab-accounts">
+              <div class="section-action-row">
+                <div>
+                  <h2>Accounts</h2>
+                  <p>Manual balance corrections stay visible as unexplained discrepancies for this cycle.</p>
+                </div>
+                <button class="primary-button" type="button" data-open-entity="account">
+                  ＋ Add account
+                </button>
+              </div>
+              <div class="card-grid" id="account-card-grid"></div>
+            </div>
+
+            <div class="plan-tab" id="plan-tab-categories">
+              <div class="section-action-row">
+                <div>
+                  <h2>Categories</h2>
+                  <p>
+                    Keep them broad enough to be useful. Uncategorised is built in and appears
+                    automatically when an item still needs organising.
+                  </p>
+                </div>
+                <button class="primary-button" type="button" data-open-entity="category">
+                  ＋ Add category
+                </button>
+              </div>
+              <div class="category-grid" id="category-card-grid"></div>
+            </div>
+          </section>
+
+          <section class="view" id="view-goals" data-title="Goals">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Future you</span>
+                <h1>Savings goals</h1>
+                <p>Choose a finish date or a contribution pace; Canopy calculates the other side.</p>
+              </div>
+              <button class="primary-button" type="button" data-open-entity="goal">
+                ＋ Add goal
+              </button>
+            </div>
+            <div class="goal-layout">
+              <div class="goal-list" id="goal-list"></div>
+              <section class="panel goal-detail" id="goal-detail">
+                <div class="empty-state">
+                  <span class="empty-icon">◎</span>
+                  <h2>Choose a goal</h2>
+                  <p>Your target line and progress story will appear here.</p>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="view" id="view-insights" data-title="Insights">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Patterns, not guilt</span>
+                <h1>Insights</h1>
+                <p>Compare cycles and months to see where your plan is working.</p>
+              </div>
+              <label class="inline-select">
+                <span>Group by</span>
+                <select id="insight-grouping">
+                  <option value="period">Pay cycle</option>
+                  <option value="month">Month</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="insight-message" id="insight-message"></div>
+            <div class="chart-grid">
+              <section class="panel chart-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Outgoings</span>
+                    <h2>Budgeted vs actual expenses</h2>
+                  </div>
+                </div>
+                <canvas id="expense-chart" height="280"></canvas>
+                <div class="chart-legend">
+                  <span><i class="legend-budget"></i> Budgeted</span>
+                  <span><i class="legend-actual"></i> Actual</span>
+                </div>
+              </section>
+              <section class="panel chart-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Earnings</span>
+                    <h2>Projected vs received</h2>
+                  </div>
+                </div>
+                <canvas id="income-chart" height="280"></canvas>
+                <div class="chart-legend">
+                  <span><i class="legend-budget"></i> Projected</span>
+                  <span><i class="legend-actual"></i> Received</span>
+                </div>
+              </section>
+            </div>
+            <section class="panel transfer-history-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Savings behaviour</span>
+                  <h2>Transfers in and out of savings</h2>
+                </div>
+              </div>
+              <p class="settings-copy">
+                Transfers never count as income or expenses. This view highlights how much was saved
+                and how often money was pulled back out.
+              </p>
+              <div id="transfer-history"></div>
+            </section>
+            <section class="panel category-breakdown-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">This cycle</span>
+                  <h2>Spending by category</h2>
+                </div>
+              </div>
+              <div class="uncategorised-alert compact" id="insight-uncategorised-alert" hidden></div>
+              <div id="category-breakdown"></div>
+            </section>
+          </section>
+
+          <section class="view" id="view-archive" data-title="Archive">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">The long view</span>
+                <h1>Archive</h1>
+                <p>Closed cycles retain transactions, planned totals, balances, and unresolved differences.</p>
+              </div>
+            </div>
+            <div class="archive-list" id="archive-list"></div>
+          </section>
+
+          <section class="view" id="view-settings" data-title="Settings">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Make it yours</span>
+                <h1>Settings &amp; data</h1>
+                <p>Your budget stays in this browser unless you export a portable JSON backup.</p>
+              </div>
+            </div>
+
+            <div class="settings-grid">
+              <section class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Pay cycle</span>
+                    <h2>Budget rhythm</h2>
+                  </div>
+                </div>
+                <form class="form-grid" id="settings-form">
+                  <label>
+                    <span>Currency</span>
+                    <select name="currency">
+                      <option value="AUD">AUD · Australian dollar</option>
+                      <option value="NZD">NZD · New Zealand dollar</option>
+                      <option value="USD">USD · US dollar</option>
+                      <option value="GBP">GBP · British pound</option>
+                      <option value="EUR">EUR · Euro</option>
+                      <option value="CAD">CAD · Canadian dollar</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Cycle length</span>
+                    <div class="field-pair">
+                      <input name="payIntervalValue" type="number" min="1" max="365" required />
+                      <select name="payIntervalUnit">
+                        <option value="days">days</option>
+                        <option value="weeks">weeks</option>
+                      </select>
+                    </div>
+                  </label>
+                  <label>
+                    <span>Current cycle starts</span>
+                    <input name="periodStart" type="date" required />
+                  </label>
+                  <label>
+                    <span>Primary income</span>
+                    <select name="primaryIncomeId"></select>
+                  </label>
+                  <label class="full-width">
+                    <span>Theme</span>
+                    <div class="theme-choices">
+                      <button type="button" data-theme-choice="power">
+                        <i class="theme-swatch power"></i>
+                        <strong>Power dark</strong>
+                        <small>Focused and low-glare</small>
+                      </button>
+                      <button type="button" data-theme-choice="fern">
+                        <i class="theme-swatch fern"></i>
+                        <strong>Forest fern</strong>
+                        <small>Calm botanical depth</small>
+                      </button>
+                      <button type="button" data-theme-choice="blush">
+                        <i class="theme-swatch blush"></i>
+                        <strong>Blush ritual</strong>
+                        <small>Warm self-care stationery</small>
+                      </button>
+                    </div>
+                  </label>
+                  <button class="primary-button" type="submit">Save settings</button>
+                </form>
+              </section>
+
+              <section class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow">Portable JSON backup</span>
+                    <h2>Protect your data</h2>
+                  </div>
+                  <span class="pill" id="backup-status-pill">Checking backup…</span>
+                </div>
+                <p class="settings-copy">
+                  Browser storage is Canopy's working copy. Export an external JSON backup at least
+                  every 48 hours so clearing browser data cannot erase your only copy.
+                </p>
+                <div class="button-stack">
+                  <div class="split-buttons">
+                    <button class="primary-button" id="export-data" type="button">
+                      Export backup now
+                    </button>
+                    <label class="quiet-button file-button">
+                      Import JSON
+                      <input id="import-data" type="file" accept=".json,application/json" />
+                    </label>
+                  </div>
+                </div>
+                <div class="data-health" id="data-health"></div>
+              </section>
+            </div>
+
+            <section class="panel shortcuts-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Power user</span>
+                  <h2>Keyboard shortcuts</h2>
+                </div>
+              </div>
+              <dl class="shortcut-list">
+                <div><dt><kbd>N</kbd></dt><dd>New transaction</dd></div>
+                <div><dt><kbd>/</kbd></dt><dd>Search transactions</dd></div>
+                <div><dt><kbd>Ctrl</kbd> <kbd>Enter</kbd></dt><dd>Save an open form</dd></div>
+                <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog</dd></div>
+              </dl>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <dialog class="app-dialog" id="transaction-dialog">
+      <form method="dialog" id="transaction-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">Money movement</span>
+            <h2 id="transaction-dialog-title">Add transaction</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button>
+        </div>
+        <input name="id" type="hidden" />
+        <div class="form-grid transaction-form-grid">
+          <label>
+            <span>Date</span>
+            <input name="date" type="date" required />
+          </label>
+          <label>
+            <span>Type</span>
+            <select name="type" id="transaction-type">
+              <option value="expense">Expense</option>
+              <option value="income">Income</option>
+              <option value="refund">Refund</option>
+              <option value="transfer">Transfer</option>
+            </select>
+          </label>
+          <label class="full-width">
+            <span>Description</span>
+            <input
+              name="description"
+              id="transaction-description"
+              type="text"
+              autocomplete="off"
+              placeholder="Who or what was this?"
+              required
+            />
+            <small id="transaction-suggestion"></small>
+          </label>
+          <label>
+            <span>Amount</span>
+            <input name="amount" type="number" min="0" step="0.01" required />
+          </label>
+          <label>
+            <span id="transaction-account-label">Account</span>
+            <select name="accountId" required></select>
+          </label>
+          <label class="transfer-only" hidden>
+            <span>To account</span>
+            <select name="toAccountId"></select>
+          </label>
+          <label class="transfer-only" hidden>
+            <span>Savings goal</span>
+            <select name="goalId"></select>
+            <small>Optional. Linked deposits add progress; linked withdrawals reduce it.</small>
+          </label>
+          <label class="non-transfer">
+            <span>Category</span>
+            <select name="categoryId"></select>
+          </label>
+          <label class="non-transfer">
+            <span>Link to planned item</span>
+            <select name="linkedPlanId"></select>
+          </label>
+          <label>
+            <span>Reference</span>
+            <input name="reference" type="text" placeholder="Optional" />
+          </label>
+          <label class="full-width">
+            <span>Note</span>
+            <textarea name="note" rows="2" placeholder="Optional"></textarea>
+          </label>
+          <label class="checkbox-label non-transfer full-width">
+            <input name="isSplit" type="checkbox" />
+            <span>Split this transaction across categories or planned expenses</span>
+          </label>
+          <div class="transfer-only transfer-form-note full-width" hidden>
+            Transfers move money between your accounts. They change both balances but never count as
+            income or spending.
+          </div>
+        </div>
+
+        <div class="split-editor" id="split-editor" hidden>
+          <div class="split-header">
+            <strong>Split lines</strong>
+            <button class="text-button" id="add-split-line" type="button">＋ Add line</button>
+          </div>
+          <div id="split-lines"></div>
+          <div class="split-total" id="split-total">Split total $0.00</div>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="danger-button" id="delete-transaction" type="button" hidden>Delete</button>
+          <span class="dialog-spacer"></span>
+          <button class="quiet-button" type="button" data-close-dialog>Cancel</button>
+          <button class="primary-button" type="submit">Save transaction</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog" id="entity-dialog">
+      <form method="dialog" id="entity-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow" id="entity-eyebrow">Plan</span>
+            <h2 id="entity-dialog-title">Add item</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button>
+        </div>
+        <input name="entityType" type="hidden" />
+        <input name="id" type="hidden" />
+        <div id="entity-form-fields"></div>
+        <div class="dialog-actions">
+          <button class="danger-button" id="delete-entity" type="button" hidden>Delete</button>
+          <span class="dialog-spacer"></span>
+          <button class="quiet-button" type="button" data-close-dialog>Cancel</button>
+          <button class="primary-button" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog small-dialog" id="adjustment-dialog">
+      <form method="dialog" id="adjustment-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">Reconcile</span>
+            <h2>Update account balance</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog aria-label="Close">×</button>
+        </div>
+        <input name="accountId" type="hidden" />
+        <p class="dialog-copy" id="adjustment-copy"></p>
+        <div class="form-grid">
+          <label>
+            <span>Reported balance</span>
+            <input name="reportedBalance" type="number" step="0.01" required />
+          </label>
+          <label>
+            <span>Date checked</span>
+            <input name="date" type="date" required />
+          </label>
+          <label class="full-width">
+            <span>Note</span>
+            <input name="note" type="text" placeholder="Optional reason or reminder" />
+          </label>
+        </div>
+        <div class="callout warning">
+          The difference will affect the current balance and remain highlighted as unaccounted for
+          until this cycle is archived.
+        </div>
+        <p class="form-message" id="adjustment-message" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="quiet-button" type="button" data-close-dialog>Cancel</button>
+          <button class="primary-button" type="submit">Record difference</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="app-dialog small-dialog backup-required-dialog"
+      id="backup-required-dialog"
+      aria-labelledby="backup-required-title"
+      aria-describedby="backup-required-copy"
+    >
+      <div class="backup-required-content">
+        <span class="eyebrow">External backup required</span>
+        <h2 id="backup-required-title">Protect your budget before continuing</h2>
+        <p class="dialog-copy" id="backup-required-copy">
+          Your external backup deadline has passed. Export a JSON copy now so it remains safe if
+          this browser's data is cleared.
+        </p>
+        <div class="callout warning">
+          The browser chooses the download folder. Canopy can suggest the filename, but it cannot
+          force a particular directory in Firefox, Safari, and Chromium.
+        </div>
+        <p class="backup-filename">
+          Suggested file: <code id="backup-required-filename"></code>
+        </p>
+        <div class="dialog-actions">
+          <button class="primary-button" id="required-export-data" type="button">
+            Export data backup
+          </button>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

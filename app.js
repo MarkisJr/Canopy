@@ -1,8 +1,8 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.3.4";
-  const SCHEMA_VERSION = 3;
+  const APP_VERSION = "0.4.0";
+  const SCHEMA_VERSION = 4;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
   const EXTERNAL_BACKUP_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -168,6 +168,7 @@
   function normalizeState(candidate) {
     const fresh = initialState();
     const next = candidate && typeof candidate === "object" ? candidate : fresh;
+    const sourceSchemaVersion = Math.max(1, Number(next.schemaVersion) || 1);
     const candidateMetadata =
       next.metadata && typeof next.metadata === "object" ? next.metadata : {};
     next.schemaVersion = SCHEMA_VERSION;
@@ -220,11 +221,42 @@
     next.transactions.forEach((transaction) => {
       if (typeof transaction.goalId !== "string") transaction.goalId = "";
       if (typeof transaction.toAccountId !== "string") transaction.toAccountId = "";
+      transaction.goalImpacts = normaliseGoalImpacts(transaction.goalImpacts);
     });
     next.goals.forEach((goal) => {
       goal.currentAmount = roundMoney(Number(goal.currentAmount) || 0);
       goal.startingAmount = roundMoney(Number(goal.startingAmount ?? goal.currentAmount) || 0);
     });
+    if (sourceSchemaVersion < 4) {
+      const goalAmounts = new Map(
+        next.goals.map((goal) => [goal.id, Math.max(0, Number(goal.currentAmount) || 0)]),
+      );
+      next.transactions
+        .slice()
+        .sort(
+          (a, b) =>
+            String(a.date || "").localeCompare(String(b.date || "")) ||
+            String(a.createdAt || "").localeCompare(String(b.createdAt || "")),
+        )
+        .forEach((transaction) => {
+          if (transaction.goalId || transaction.goalImpacts.length) return;
+          transaction.goalImpacts = automaticGoalImpactsForState(
+            transaction,
+            next.goals,
+            next.accounts,
+            goalAmounts,
+          );
+          transaction.goalImpacts.forEach((impact) => {
+            const amount = Math.max(
+              0,
+              roundMoney((goalAmounts.get(impact.goalId) || 0) + impact.amount),
+            );
+            goalAmounts.set(impact.goalId, amount);
+            const goal = next.goals.find((item) => item.id === impact.goalId);
+            if (goal) goal.currentAmount = amount;
+          });
+        });
+    }
     if (!next.periods.some((period) => period.id === next.metadata.activePeriodId)) {
       const period = fresh.periods[0];
       period.openingBalances = Object.fromEntries(next.accounts.map((account) => [account.id, 0]));
@@ -496,15 +528,139 @@
     return Number.isFinite(storedEffect) ? storedEffect : inferGoalTransferEffect(transaction);
   }
 
+  function normaliseGoalImpacts(impacts) {
+    if (!Array.isArray(impacts)) return [];
+    return impacts
+      .map((impact) => ({
+        goalId: String(impact?.goalId || ""),
+        amount: roundMoney(impact?.amount),
+        reason: String(impact?.reason || "unlinked-savings-withdrawal"),
+      }))
+      .filter((impact) => impact.goalId && Number.isFinite(impact.amount) && impact.amount < -0.005);
+  }
+
+  function goalImpactEntries(transaction) {
+    if (transaction?.type !== "transfer") return [];
+    if (transaction.goalId) {
+      const amount = goalTransferEffect(transaction);
+      return Math.abs(amount) >= 0.005
+        ? [{ goalId: transaction.goalId, amount, automatic: false }]
+        : [];
+    }
+    return normaliseGoalImpacts(transaction.goalImpacts).map((impact) => ({
+      ...impact,
+      automatic: true,
+    }));
+  }
+
+  function transactionGoalEffect(transaction, goalId) {
+    return roundMoney(
+      goalImpactEntries(transaction)
+        .filter((impact) => impact.goalId === goalId)
+        .reduce((sum, impact) => sum + impact.amount, 0),
+    );
+  }
+
+  function automaticGoalImpactsForState(
+    transaction,
+    goals,
+    accounts,
+    goalAmounts = new Map(goals.map((goal) => [goal.id, Number(goal.currentAmount) || 0])),
+  ) {
+    if (
+      transaction?.type !== "transfer" ||
+      transaction.goalId ||
+      Number(transaction.amount) <= 0
+    ) {
+      return [];
+    }
+    const source = accounts.find((account) => account.id === transaction.accountId);
+    const destination = accounts.find((account) => account.id === transaction.toAccountId);
+    if (source?.kind !== "savings" || destination?.kind === "savings") return [];
+
+    const hasSingleSavingsPool =
+      accounts.filter((account) => account.kind === "savings").length === 1;
+    const candidates = goals
+      .filter(
+        (goal) =>
+          (!goal.startDate || !transaction.date || transaction.date >= goal.startDate) &&
+          (goal.accountId === source.id || (!goal.accountId && hasSingleSavingsPool)),
+      )
+      .map((goal) => ({
+        goal,
+        available: Math.max(0, roundMoney(goalAmounts.get(goal.id) || 0)),
+      }))
+      .filter((entry) => entry.available >= 0.005);
+    const totalAvailable = roundMoney(
+      candidates.reduce((sum, entry) => sum + entry.available, 0),
+    );
+    const totalImpact = Math.min(roundMoney(transaction.amount), totalAvailable);
+    if (totalImpact < 0.005) return [];
+
+    let remaining = totalImpact;
+    return candidates
+      .map((entry, index) => {
+        const proportional =
+          index === candidates.length - 1
+            ? remaining
+            : roundMoney(totalImpact * (entry.available / totalAvailable));
+        const allocated = Math.min(entry.available, remaining, proportional);
+        remaining = roundMoney(remaining - allocated);
+        return {
+          goalId: entry.goal.id,
+          amount: roundMoney(-allocated),
+          reason: "unlinked-savings-withdrawal",
+        };
+      })
+      .filter((impact) => impact.amount < -0.005);
+  }
+
+  function automaticGoalImpacts(transaction, previousTransaction = null) {
+    const goalAmounts = new Map(
+      state.goals.map((goal) => [goal.id, Math.max(0, Number(goal.currentAmount) || 0)]),
+    );
+    goalImpactEntries(previousTransaction).forEach((impact) => {
+      goalAmounts.set(
+        impact.goalId,
+        Math.max(0, roundMoney((goalAmounts.get(impact.goalId) || 0) - impact.amount)),
+      );
+    });
+    return automaticGoalImpactsForState(
+      transaction,
+      state.goals,
+      state.accounts,
+      goalAmounts,
+    );
+  }
+
+  function transactionMutationMessage(action, transaction) {
+    const impacts = normaliseGoalImpacts(transaction?.goalImpacts);
+    if (!impacts.length) return action;
+    const total = Math.abs(
+      roundMoney(impacts.reduce((sum, impact) => sum + impact.amount, 0)),
+    );
+    if (impacts.length === 1) {
+      const goal = goalById(impacts[0].goalId);
+      return `${action} ${money(total)} was automatically removed from ${
+        goal?.name || "the associated savings goal"
+      }.`;
+    }
+    return `${action} ${money(total)} was automatically shared across ${impacts.length} savings goals.`;
+  }
+
   function applyGoalTransferChange(previousTransaction, nextTransaction) {
     const changes = new Map();
     for (const [transaction, multiplier] of [
       [previousTransaction, -1],
       [nextTransaction, 1],
     ]) {
-      if (!transaction?.goalId) continue;
-      const effect = goalTransferEffect(transaction) * multiplier;
-      changes.set(transaction.goalId, roundMoney((changes.get(transaction.goalId) || 0) + effect));
+      goalImpactEntries(transaction).forEach((impact) => {
+        const effect = impact.amount * multiplier;
+        changes.set(
+          impact.goalId,
+          roundMoney((changes.get(impact.goalId) || 0) + effect),
+        );
+      });
     }
     changes.forEach((amount, goalId) => {
       const goal = goalById(goalId);
@@ -1574,6 +1730,9 @@
         const account = accountById(transaction.accountId);
         const destination = accountById(transaction.toAccountId);
         const goal = goalById(transaction.goalId);
+        const automaticallyAffectedGoals = normaliseGoalImpacts(transaction.goalImpacts)
+          .map((impact) => goalById(impact.goalId)?.name)
+          .filter(Boolean);
         const category = categoryById(transaction.categoryId);
         return [
           transaction.description,
@@ -1582,6 +1741,7 @@
           account?.name,
           destination?.name,
           goal?.name,
+          ...automaticallyAffectedGoals,
           category?.name,
         ].some((value) => String(value || "").toLowerCase().includes(search));
       })
@@ -1654,7 +1814,14 @@
       const destination = accountById(transaction.toAccountId);
       const direction = transferDirection(transaction);
       if (direction === "savings-in") return "Savings contribution";
-      if (direction === "savings-out") return "Savings withdrawal";
+      if (direction === "savings-out") {
+        const impacts = normaliseGoalImpacts(transaction.goalImpacts);
+        if (impacts.length === 1) {
+          return `Reduced ${goalById(impacts[0].goalId)?.name || "savings goal"}`;
+        }
+        if (impacts.length > 1) return `Reduced ${impacts.length} savings goals`;
+        return "Savings withdrawal";
+      }
       return destination ? `Transfer to ${destination.name}` : "Transfer";
     }
     if (transaction.splits?.length) return `${transaction.splits.length}-way split`;
@@ -1917,16 +2084,20 @@
       .filter(
         (transaction) =>
           transaction.type === "transfer" &&
-          transaction.goalId === goal.id &&
+          Math.abs(transactionGoalEffect(transaction, goal.id)) >= 0.005 &&
           (!period || transaction.periodId === period.id),
       )
-      .sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+      .sort(
+        (a, b) =>
+          String(a.date || "").localeCompare(String(b.date || "")) ||
+          String(a.createdAt || "").localeCompare(String(b.createdAt || "")),
+      );
   }
 
   function goalTransferNet(goal, period = null) {
     return roundMoney(
       goalTransfers(goal, period).reduce(
-        (sum, transaction) => sum + goalTransferEffect(transaction),
+        (sum, transaction) => sum + transactionGoalEffect(transaction, goal.id),
         0,
       ),
     );
@@ -2034,15 +2205,15 @@
          ${account ? ` This goal is associated with ${escapeHtml(account.name)}.` : ""}
          ${
            progressDate > today
-             ? ` The progress point is plotted at ${formatDate(progressDate)}, the date of the latest linked transfer.`
+             ? ` The progress point is plotted at ${formatDate(progressDate)}, the date of the latest savings movement.`
              : ""
          }
       </div>
       <div class="goal-transfer-summary">
         <div class="panel-heading compact">
           <div>
-            <span class="eyebrow">Actual contributions</span>
-            <h3>Linked savings transfers</h3>
+            <span class="eyebrow">Actual movement</span>
+            <h3>Savings impact</h3>
           </div>
           <strong class="${cycleTransferNet >= 0 ? "status-good" : "status-bad"}">${money(
             cycleTransferNet,
@@ -2050,15 +2221,16 @@
           )} this cycle</strong>
         </div>
         <p>
-          The planned amount above is your target pace. Linked transfers are the actual progress and
-          are never treated as expenses.
+          The planned amount above is your target pace. Linked transfers and automatic shares of
+          unlinked withdrawals form the actual progress line; neither is treated as an expense.
         </p>
         <div class="goal-transfer-list">
           ${
             recentGoalTransfers.length
               ? recentGoalTransfers
                   .map((transaction) => {
-                    const effect = goalTransferEffect(transaction);
+                    const effect = transactionGoalEffect(transaction, goal.id);
+                    const automatic = !transaction.goalId;
                     const otherAccount =
                       effect >= 0
                         ? accountById(transaction.accountId)
@@ -2066,19 +2238,26 @@
                     return `<div>
                       <span>${formatCompactDate(transaction.date)} · ${escapeHtml(
                         otherAccount?.name || transaction.description,
-                      )}</span>
+                      )}${automatic ? " · Automatic share" : ""}</span>
                       <strong class="${effect >= 0 ? "status-good" : "status-bad"}">${money(effect, {
                         sign: true,
                       })}</strong>
                     </div>`;
                   })
                   .join("")
-              : "<p>No transfers have been linked to this goal yet.</p>"
+              : "<p>No savings movement has affected this goal yet.</p>"
           }
         </div>
       </div>
-      <div class="goal-chart-wrap">
+      <div class="goal-chart-wrap" style="--goal-chart-colour:${escapeHtml(
+        goal.color || "var(--good)",
+      )}">
         <canvas id="goal-chart" height="230" aria-label="Savings goal progress chart"></canvas>
+        <div class="goal-chart-key" aria-hidden="true">
+          <span><i class="target-line"></i>Steady target</span>
+          <span><i class="saved-line"></i>Savings added</span>
+          <span><i class="withdrawn-line"></i>Savings withdrawn</span>
+        </div>
       </div>
       <div class="dialog-actions" style="position:static;padding:18px 0 0;border:0;background:transparent">
         <button class="primary-button" type="button" data-add-goal-progress="${escapeHtml(
@@ -2138,12 +2317,20 @@
     context.stroke();
     context.setLineDash([]);
 
-    context.strokeStyle = goal.color || themeCss("--good");
-    context.lineWidth = 4;
-    context.lineCap = "round";
-    context.beginPath();
-    context.moveTo(x(0), y(starting));
+    const positiveColour = goal.color || themeCss("--good");
+    const negativeColour = themeCss("--bad");
+    const drawActualSegment = (fromDay, fromAmount, toDay, toAmount, colour) => {
+      context.strokeStyle = colour;
+      context.lineWidth = 4;
+      context.lineCap = "round";
+      context.beginPath();
+      context.moveTo(x(fromDay), y(fromAmount));
+      context.lineTo(x(toDay), y(toAmount));
+      context.stroke();
+    };
     let runningAmount = starting;
+    let previousDay = 0;
+    let endpointColour = positiveColour;
     goalTransfers(goal)
       .filter((transaction) => {
         const day = Math.round((parseDate(transaction.date) - start) / 86400000);
@@ -2154,14 +2341,27 @@
           0,
           Math.min(progressDays, Math.round((parseDate(transaction.date) - start) / 86400000)),
         );
-        context.lineTo(x(day), y(runningAmount));
-        runningAmount = roundMoney(runningAmount + goalTransferEffect(transaction));
-        context.lineTo(x(day), y(runningAmount));
+        const effect = transactionGoalEffect(transaction, goal.id);
+        const nextAmount = roundMoney(Math.max(0, runningAmount + effect));
+        endpointColour = effect < 0 ? negativeColour : positiveColour;
+        drawActualSegment(previousDay, runningAmount, day, nextAmount, endpointColour);
+        runningAmount = nextAmount;
+        previousDay = day;
       });
-    context.lineTo(x(progressDays), y(projection.current));
-    context.stroke();
 
-    context.fillStyle = goal.color || themeCss("--good");
+    const reconciliationDifference = roundMoney(projection.current - runningAmount);
+    if (Math.abs(reconciliationDifference) >= 0.005) {
+      endpointColour = reconciliationDifference < 0 ? negativeColour : positiveColour;
+    }
+    drawActualSegment(
+      previousDay,
+      runningAmount,
+      progressDays,
+      projection.current,
+      endpointColour,
+    );
+
+    context.fillStyle = endpointColour;
     context.beginPath();
     context.arc(x(progressDays), y(projection.current), 5, 0, Math.PI * 2);
     context.fill();
@@ -2757,17 +2957,24 @@
       return false;
     }
     transaction.transferNature = type === "transfer" ? inferTransferDirection(transaction) : "";
+    const previousTransaction = existing ? clone(existing) : null;
     transaction.goalContribution =
       type === "transfer" && transaction.goalId
         ? roundMoney(inferGoalTransferEffect(transaction))
         : 0;
-    const previousTransaction = existing ? clone(existing) : null;
+    transaction.goalImpacts = automaticGoalImpacts(transaction, previousTransaction);
 
-    mutate(existing ? "Transaction updated." : "Transaction added.", () => {
+    mutate(
+      transactionMutationMessage(
+        existing ? "Transaction updated." : "Transaction added.",
+        transaction,
+      ),
+      () => {
       if (existing) Object.assign(existing, transaction);
       else state.transactions.push(transaction);
       applyGoalTransferChange(previousTransaction, transaction);
-    });
+      },
+    );
     return true;
   }
 
@@ -2816,9 +3023,10 @@
       type === "transfer" && transaction.goalId
         ? roundMoney(inferGoalTransferEffect(transaction))
         : 0;
+    transaction.goalImpacts = automaticGoalImpacts(transaction);
     const date = transaction.date;
     const accountId = transaction.accountId;
-    mutate("Transaction added.", () => {
+    mutate(transactionMutationMessage("Transaction added.", transaction), () => {
       state.transactions.push(transaction);
       applyGoalTransferChange(null, transaction);
     });
@@ -3256,7 +3464,13 @@
       }
       if (type === "goal") {
         state.transactions.forEach((transaction) => {
-          if (transaction.goalId === id) transaction.goalId = "";
+          if (transaction.goalId === id) {
+            transaction.goalId = "";
+            transaction.goalContribution = 0;
+          }
+          transaction.goalImpacts = normaliseGoalImpacts(transaction.goalImpacts).filter(
+            (impact) => impact.goalId !== id,
+          );
         });
         if (selectedGoalId === id) selectedGoalId = null;
       }
@@ -3550,7 +3764,7 @@
         const goal = goalById(progressButton.dataset.addGoalProgress);
         if (!goal) return;
         const answer = window.prompt(
-          `What is the reconciled amount saved toward “${goal.name}” now? Linked transfers are already included.`,
+          `What is the reconciled amount saved toward “${goal.name}” now? Linked transfers and automatic withdrawal shares are already included.`,
           Number(goal.currentAmount || 0).toFixed(2),
         );
         if (answer === null) return;
@@ -3808,7 +4022,10 @@
       transferDirection,
       transferStats,
       goalTransferEffect,
+      transactionGoalEffect,
+      automaticGoalImpacts,
       applyGoalTransferChange,
+      goalTransferNet,
       goalProgressDate,
       recordBalanceDifference,
       categoryOptions,

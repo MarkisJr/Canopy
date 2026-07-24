@@ -321,6 +321,184 @@ assert.equal(
   "deleting a linked transfer should reverse its goal contribution",
 );
 
+const automaticWithdrawal = {
+  id: "automatic_goal_withdrawal",
+  periodId: period.id,
+  date: "2026-03-24",
+  type: "transfer",
+  amount: 30,
+  accountId: "acct_savings",
+  toAccountId: "acct_bills",
+  goalId: "",
+  goalImpacts: [],
+  createdAt: "2026-03-24T00:00:00.000Z",
+};
+automaticWithdrawal.goalImpacts = core.automaticGoalImpacts(automaticWithdrawal);
+assert.deepEqual(
+  automaticWithdrawal.goalImpacts,
+  [
+    {
+      goalId: "goal_holiday",
+      amount: -30,
+      reason: "unlinked-savings-withdrawal",
+    },
+  ],
+  "an unlinked savings withdrawal should automatically reduce the goal using that account",
+);
+core.applyGoalTransferChange(null, automaticWithdrawal);
+assert.equal(core.getStateForTest().goals[0].currentAmount, 70);
+core.getStateForTest().transactions.push(automaticWithdrawal);
+assert.equal(
+  core.goalProgressDate(state.goals[0], { endDate: "2026-03-25" }, "2026-03-23"),
+  "2026-03-24",
+  "an automatic withdrawal should advance the plotted actual point to its transaction date",
+);
+assert.equal(
+  core.goalTransferNet(state.goals[0], period),
+  -30,
+  "automatic withdrawal shares should appear in the goal's cycle movement",
+);
+
+const editedAutomaticWithdrawal = {
+  ...automaticWithdrawal,
+  amount: 50,
+  goalImpacts: [],
+};
+editedAutomaticWithdrawal.goalImpacts = core.automaticGoalImpacts(
+  editedAutomaticWithdrawal,
+  automaticWithdrawal,
+);
+core.applyGoalTransferChange(automaticWithdrawal, editedAutomaticWithdrawal);
+assert.equal(
+  core.getStateForTest().goals[0].currentAmount,
+  50,
+  "editing an automatic withdrawal should reverse its previous effect before applying the new one",
+);
+core.applyGoalTransferChange(editedAutomaticWithdrawal, null);
+assert.equal(
+  core.getStateForTest().goals[0].currentAmount,
+  100,
+  "deleting an automatic withdrawal should restore its goal effect",
+);
+core.getStateForTest().transactions = core
+  .getStateForTest()
+  .transactions.filter((transaction) => transaction.id !== automaticWithdrawal.id);
+
+const pooledGoalState = core.initialState();
+const pooledPeriod = pooledGoalState.periods[0];
+pooledPeriod.startDate = "2026-04-01";
+pooledPeriod.endDate = "2026-04-14";
+pooledGoalState.goals = [
+  {
+    id: "goal_large",
+    name: "Large goal",
+    accountId: "acct_savings",
+    targetAmount: 1000,
+    currentAmount: 300,
+    startingAmount: 300,
+    startDate: "2026-04-01",
+  },
+  {
+    id: "goal_small",
+    name: "Small goal",
+    accountId: "acct_savings",
+    targetAmount: 500,
+    currentAmount: 100,
+    startingAmount: 100,
+    startDate: "2026-04-01",
+  },
+];
+core.setStateForTest(pooledGoalState);
+const pooledWithdrawal = {
+  id: "pooled_withdrawal",
+  periodId: pooledPeriod.id,
+  date: "2026-04-05",
+  type: "transfer",
+  amount: 80,
+  accountId: "acct_savings",
+  toAccountId: "acct_bills",
+  goalId: "",
+};
+pooledWithdrawal.goalImpacts = core.automaticGoalImpacts(pooledWithdrawal);
+assert.deepEqual(
+  pooledWithdrawal.goalImpacts,
+  [
+    {
+      goalId: "goal_large",
+      amount: -60,
+      reason: "unlinked-savings-withdrawal",
+    },
+    {
+      goalId: "goal_small",
+      amount: -20,
+      reason: "unlinked-savings-withdrawal",
+    },
+  ],
+  "one withdrawal should be allocated proportionally across goals sharing the savings account",
+);
+core.applyGoalTransferChange(null, pooledWithdrawal);
+assert.deepEqual(
+  core.getStateForTest().goals.map((goal) => goal.currentAmount),
+  [240, 80],
+  "the pooled withdrawal must be counted once rather than once per goal",
+);
+assert.deepEqual(
+  core.automaticGoalImpacts({
+    ...pooledWithdrawal,
+    goalId: "goal_large",
+  }),
+  [],
+  "an explicitly selected goal should suppress automatic allocation",
+);
+assert.deepEqual(
+  core.automaticGoalImpacts({
+    ...pooledWithdrawal,
+    accountId: "acct_everyday",
+    toAccountId: "acct_savings",
+  }),
+  [],
+  "unlinked deposits should not receive automatic goal credit",
+);
+
+const legacyWithdrawalState = core.initialState();
+legacyWithdrawalState.schemaVersion = 3;
+legacyWithdrawalState.goals = [
+  {
+    id: "goal_legacy",
+    name: "Legacy goal",
+    accountId: "acct_savings",
+    targetAmount: 500,
+    currentAmount: 100,
+    startingAmount: 100,
+    startDate: "2026-04-01",
+  },
+];
+legacyWithdrawalState.transactions = [
+  {
+    id: "legacy_unlinked_withdrawal",
+    periodId: legacyWithdrawalState.periods[0].id,
+    date: "2026-04-05",
+    type: "transfer",
+    amount: 30,
+    accountId: "acct_savings",
+    toAccountId: "acct_bills",
+    goalId: "",
+  },
+];
+const migratedWithdrawalState = core.normalizeState(legacyWithdrawalState);
+assert.equal(migratedWithdrawalState.goals[0].currentAmount, 70);
+assert.equal(
+  migratedWithdrawalState.transactions[0].goalImpacts[0].amount,
+  -30,
+  "existing unlinked withdrawals should be migrated into visible goal history once",
+);
+assert.equal(
+  core.normalizeState(migratedWithdrawalState).goals[0].currentAmount,
+  70,
+  "normalising migrated data again must not apply an automatic withdrawal twice",
+);
+
+core.setStateForTest(state);
 state.transactions.push({
   id: "future_goal_transfer",
   periodId: period.id,
@@ -832,7 +1010,7 @@ delete legacyState.metadata.lastExternalBackupAt;
 delete legacyState.metadata.backupWindowStartedAt;
 legacyState.backups = [{ id: "browser_only_backup" }];
 const migratedState = core.normalizeState(legacyState);
-assert.equal(migratedState.schemaVersion, 3);
+assert.equal(migratedState.schemaVersion, 4);
 assert.equal(
   migratedState.metadata.backupWindowStartedAt,
   legacyState.metadata.createdAt,

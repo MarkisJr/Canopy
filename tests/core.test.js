@@ -222,6 +222,103 @@ assert.equal(
 assert.equal(core.matchingPlan("CITY GYM MONTHLY MEMBERSHIP", "expense").id, "expense_monthly");
 assert.equal(core.matchingPlan("weekly payroll deposit", "income").id, "income_main");
 
+const noIncomePaceState = core.initialState();
+const noIncomePacePeriod = noIncomePaceState.periods[0];
+noIncomePacePeriod.startDate = "2026-07-20";
+noIncomePacePeriod.endDate = "2026-08-02";
+noIncomePaceState.incomeSources = [];
+noIncomePaceState.expenses = [
+  {
+    id: "pace_expenses",
+    name: "Cycle expenses",
+    amount: 649.02,
+    accountId: "acct_bills",
+    categoryId: "cat_bills",
+    active: true,
+    schedule: {
+      mode: "recurring",
+      anchorDate: "2026-07-21",
+      interval: 1,
+      unit: "months",
+      expectedDates: [],
+    },
+  },
+];
+noIncomePaceState.transactions = [
+  {
+    id: "pace_spending",
+    periodId: noIncomePacePeriod.id,
+    date: "2026-07-22",
+    type: "expense",
+    amount: 178.89,
+    accountId: "acct_bills",
+    description: "Recorded spending",
+  },
+  {
+    id: "pace_savings",
+    periodId: noIncomePacePeriod.id,
+    date: "2026-07-23",
+    type: "transfer",
+    amount: 700,
+    accountId: "acct_everyday",
+    toAccountId: "acct_savings",
+    transferNature: "savings-in",
+    description: "Moved to savings",
+  },
+];
+core.setStateForTest(noIncomePaceState);
+const noIncomePace = core.cyclePaceSnapshot(noIncomePacePeriod, "2026-07-26");
+assert.deepEqual(
+  {
+    actualExpenses: noIncomePace.actualExpenses,
+    budgetExpenses: noIncomePace.budgetExpenses,
+    remainingPlanned: noIncomePace.remainingPlanned,
+    expensePercent: noIncomePace.expensePercent,
+    elapsedPercent: noIncomePace.elapsedPercent,
+    cashFlow: noIncomePace.cashFlow,
+    savingsMovement: noIncomePace.savingsMovement,
+    incomeState: noIncomePace.incomeState,
+  },
+  {
+    actualExpenses: 178.89,
+    budgetExpenses: 649.02,
+    remainingPlanned: 470.13,
+    expensePercent: 27.6,
+    elapsedPercent: 46,
+    cashFlow: -178.89,
+    savingsMovement: 700,
+    incomeState: "none-scheduled",
+  },
+  "cycle pace should describe expense-plan usage without inventing a funding shortage when no income is scheduled",
+);
+const noPlanPace = core.cyclePaceSnapshot(noIncomePacePeriod, "2026-07-26", {
+  budgetExpenses: 0,
+  actualExpenses: 50,
+  budgetIncome: 0,
+  actualIncome: 0,
+  actualNet: -50,
+});
+assert.equal(noPlanPace.expensePercent, null);
+assert.equal(noPlanPace.visualExpenseRatio, 1);
+assert.equal(noPlanPace.overPlan, true);
+assert.equal(
+  noPlanPace.remainingPlanned,
+  0,
+  "spending without an expense plan should be shown as unplanned rather than as a percentage",
+);
+const overPlanPace = core.cyclePaceSnapshot(noIncomePacePeriod, "2026-07-26", {
+  budgetExpenses: 100,
+  actualExpenses: 150,
+  budgetIncome: 0,
+  actualIncome: 0,
+  actualNet: -150,
+});
+assert.equal(overPlanPace.expensePercent, 150);
+assert.equal(overPlanPace.visualExpenseRatio, 1);
+assert.equal(overPlanPace.overPlan, true);
+assert.equal(overPlanPace.remainingPlanned, 0);
+core.setStateForTest(state);
+
 const transferStats = core.transferStats([
   {
     type: "transfer",

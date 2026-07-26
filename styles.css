@@ -879,6 +879,8 @@ main {
 
 .pace-ring {
   --progress: 0deg;
+  --pace-spent: var(--accent);
+  --pace-remaining: color-mix(in srgb, var(--warn) 42%, var(--surface-3));
   position: relative;
   display: grid;
   width: 150px;
@@ -886,7 +888,19 @@ main {
   flex: 0 0 auto;
   place-items: center;
   border-radius: 50%;
-  background: conic-gradient(var(--accent) var(--progress), var(--surface-3) 0);
+  background: conic-gradient(
+    var(--pace-spent) 0 var(--progress),
+    var(--pace-remaining) var(--progress) 360deg
+  );
+}
+
+.pace-ring.is-over-plan,
+.pace-ring.has-no-plan {
+  --pace-spent: var(--bad);
+}
+
+.pace-ring.is-empty {
+  --pace-remaining: var(--surface-3);
 }
 
 .pace-ring::before {
@@ -913,21 +927,26 @@ main {
 
 .pace-ring strong {
   font-family: var(--font-display);
-  font-size: 1.25rem;
+  font-size: 1.65rem;
   font-variant-numeric: tabular-nums;
   line-height: 1.05;
+}
+
+.pace-ring.has-no-plan strong {
+  font-size: 1.05rem;
 }
 
 .pace-ring span {
   margin-top: 5px;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.68rem;
+  line-height: 1.2;
 }
 
 .pace-legend {
   display: grid;
   min-width: 0;
-  gap: 10px;
+  gap: 8px;
 }
 
 .legend-row {
@@ -950,6 +969,45 @@ main {
 .legend-row strong {
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+.cycle-pace-note {
+  --note-colour: var(--accent);
+  --note-soft: var(--accent-soft);
+  display: grid;
+  gap: 3px;
+  margin-top: 15px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--note-colour) 28%, var(--border));
+  border-left: 3px solid var(--note-colour);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--note-soft) 62%, var(--surface));
+}
+
+.cycle-pace-note.tone-warn {
+  --note-colour: var(--warn);
+  --note-soft: var(--warn-soft);
+}
+
+.cycle-pace-note.tone-good {
+  --note-colour: var(--good);
+  --note-soft: var(--good-soft);
+}
+
+.cycle-pace-note strong,
+.cycle-pace-note span {
+  display: block;
+}
+
+.cycle-pace-note strong {
+  color: var(--note-colour);
+  font-size: 0.78rem;
+}
+
+.cycle-pace-note span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
 }
 
 .expense-buffer-panel {

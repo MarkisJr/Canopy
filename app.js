@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.4.0";
+  const APP_VERSION = "0.4.1";
   const SCHEMA_VERSION = 4;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
@@ -1048,6 +1048,56 @@
     };
   }
 
+  function cyclePaceSnapshot(
+    period = activePeriod(),
+    today = localDate(),
+    summary = summaryForPeriod(period),
+  ) {
+    const budgetExpenses = Math.max(0, roundMoney(summary.budgetExpenses));
+    const actualExpenses = Math.max(0, roundMoney(summary.actualExpenses));
+    const remainingPlanned = roundMoney(Math.max(0, budgetExpenses - actualExpenses));
+    const rawExpenseRatio = budgetExpenses > 0 ? actualExpenses / budgetExpenses : null;
+    const expensePercent =
+      rawExpenseRatio === null ? null : Math.round(rawExpenseRatio * 1000) / 10;
+    const visualExpenseRatio =
+      rawExpenseRatio === null
+        ? actualExpenses >= 0.005
+          ? 1
+          : 0
+        : Math.max(0, Math.min(1, rawExpenseRatio));
+    const totalCycleDays = Math.max(1, daysBetween(period.startDate, period.endDate));
+    const elapsedCycleDays = Math.max(
+      0,
+      Math.min(totalCycleDays, daysBetween(period.startDate, today)),
+    );
+    const elapsedPercent = Math.round((elapsedCycleDays / totalCycleDays) * 100);
+    const budgetIncome = Math.max(0, roundMoney(summary.budgetIncome));
+    const actualIncome = Math.max(0, roundMoney(summary.actualIncome));
+    let incomeState = "received";
+    if (budgetIncome < 0.005 && actualIncome < 0.005) incomeState = "none-scheduled";
+    else if (budgetIncome < 0.005) incomeState = "unplanned";
+    else if (actualIncome < 0.005) incomeState = "awaiting";
+    else if (actualIncome < budgetIncome - 0.005) incomeState = "partial";
+
+    return {
+      budgetExpenses,
+      actualExpenses,
+      remainingPlanned,
+      expensePercent,
+      visualExpenseRatio,
+      overPlan:
+        budgetExpenses > 0
+          ? actualExpenses > budgetExpenses + 0.005
+          : actualExpenses >= 0.005,
+      elapsedPercent,
+      budgetIncome,
+      actualIncome,
+      incomeState,
+      cashFlow: roundMoney(summary.actualNet),
+      savingsMovement: transferStats(periodTransactions(period)).netSavings,
+    };
+  }
+
   function varianceStatus(difference, reference) {
     const tolerance = Math.max(5, Math.abs(Number(reference) || 0) * 0.05);
     if (difference > tolerance) return "good";
@@ -1191,43 +1241,140 @@
         : daysLeft === 0
           ? "Ends today"
           : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`;
-    const expenseRatio =
-      summary.budgetExpenses > 0
-        ? Math.max(0, Math.min(1, summary.actualExpenses / summary.budgetExpenses))
-        : 0;
-    const remainingPlanned = Math.max(0, summary.budgetExpenses - summary.actualExpenses);
-    const savingsMovement = transferStats(periodTransactions(period)).netSavings;
-    const unallocated = roundMoney(
-      summary.actualIncome - summary.actualExpenses - remainingPlanned - savingsMovement,
-    );
-    $("#safe-to-spend").textContent = money(unallocated);
-    $("#safe-to-spend").className = unallocated < 0 ? "status-bad" : "";
-    $("#pace-ring").style.setProperty("--progress", `${expenseRatio * 360}deg`);
-    const paceLegend = [
-      ["var(--bad)", "Spent", summary.actualExpenses],
-      ["var(--warn)", "Still planned", remainingPlanned],
-      ["var(--good)", "Net so far", summary.actualNet],
-    ];
-    if (Math.abs(savingsMovement) >= 0.005) {
-      paceLegend.push([
-        savingsMovement >= 0 ? "var(--good)" : "var(--warn)",
-        savingsMovement >= 0 ? "Moved to savings" : "Pulled from savings",
-        Math.abs(savingsMovement),
-      ]);
-    }
-    $("#pace-legend").innerHTML = paceLegend
-      .map(
-        ([colour, label, amount]) =>
-          `<div class="legend-row"><i style="background:${colour}"></i><span>${label}</span><strong>${money(
-            amount,
-          )}</strong></div>`,
-      )
-      .join("");
+    renderCyclePace(period, summary, today);
 
     renderExpenseBuffer(period);
     renderUpcoming(period);
     renderDashboardAccounts(period);
     renderRecentTransactions(period);
+  }
+
+  function renderCyclePace(period, summary, today) {
+    const pace = cyclePaceSnapshot(period, today, summary);
+    const ring = $("#pace-ring");
+    const hasExpensePlan = pace.budgetExpenses >= 0.005;
+    ring.style.setProperty("--progress", `${pace.visualExpenseRatio * 360}deg`);
+    ring.classList.toggle("is-over-plan", pace.overPlan);
+    ring.classList.toggle("has-no-plan", !hasExpensePlan && pace.actualExpenses >= 0.005);
+    ring.classList.toggle(
+      "is-empty",
+      !hasExpensePlan && pace.actualExpenses < 0.005,
+    );
+    ring.setAttribute("aria-valuemin", "0");
+    ring.setAttribute(
+      "aria-valuemax",
+      String(Math.max(1, pace.budgetExpenses, pace.actualExpenses)),
+    );
+    ring.setAttribute("aria-valuenow", String(pace.actualExpenses));
+    ring.setAttribute(
+      "aria-valuetext",
+      hasExpensePlan
+        ? `${money(pace.actualExpenses)} of ${money(
+            pace.budgetExpenses,
+          )} planned expenses recorded, ${Math.round(pace.expensePercent)} percent`
+        : pace.actualExpenses >= 0.005
+          ? `${money(pace.actualExpenses)} recorded with no planned expense total`
+          : "No planned or recorded expenses",
+    );
+    $("#pace-percentage").textContent = hasExpensePlan
+      ? `${Math.round(pace.expensePercent)}%`
+      : pace.actualExpenses >= 0.005
+        ? "No plan"
+        : "0%";
+    $("#pace-ring-label").textContent = hasExpensePlan
+      ? "of expense plan spent"
+      : pace.actualExpenses >= 0.005
+        ? "expenses recorded"
+        : "no expense plan";
+
+    const paceLegend = [
+      {
+        colour: pace.overPlan ? "var(--bad)" : "var(--accent)",
+        label: "Spent",
+        amount: pace.actualExpenses,
+      },
+      {
+        colour: "var(--warn)",
+        label: "Still planned",
+        amount: pace.remainingPlanned,
+      },
+      {
+        colour: "var(--good)",
+        label: "Income received",
+        amount: pace.actualIncome,
+      },
+      {
+        colour: pace.cashFlow < -0.005 ? "var(--bad)" : "var(--good)",
+        label: "Cash flow so far",
+        amount: pace.cashFlow,
+        sign: Math.abs(pace.cashFlow) >= 0.005,
+      },
+      {
+        colour:
+          pace.savingsMovement > 0.005
+            ? "var(--good)"
+            : pace.savingsMovement < -0.005
+              ? "var(--bad)"
+              : "var(--faint)",
+        label:
+          pace.savingsMovement > 0.005
+            ? "Moved to savings"
+            : pace.savingsMovement < -0.005
+              ? "Pulled from savings"
+              : "Savings movement",
+        amount: Math.abs(pace.savingsMovement),
+      },
+    ];
+    $("#pace-legend").innerHTML = paceLegend
+      .map(
+        (entry) =>
+          `<div class="legend-row"><i style="background:${entry.colour}"></i><span>${escapeHtml(
+            entry.label,
+          )}</span><strong>${money(entry.amount, { sign: entry.sign })}</strong></div>`,
+      )
+      .join("");
+
+    const expenseTiming = hasExpensePlan
+      ? `You are ${pace.elapsedPercent}% through the cycle and have recorded ${Math.round(
+          pace.expensePercent,
+        )}% of planned expenses.`
+      : pace.actualExpenses >= 0.005
+        ? `${money(pace.actualExpenses)} of spending has been recorded without a planned expense total.`
+        : "There is no planned or recorded spending in this cycle yet.";
+    let noteTone = "neutral";
+    let noteTitle = "Cycle income is on record";
+    let noteCopy = `${expenseTiming} ${money(pace.actualIncome)} has been received this cycle.`;
+    if (pace.incomeState === "none-scheduled") {
+      noteTitle = "No income is scheduled in this cycle";
+      noteCopy = `${expenseTiming} Spending is being funded from balances already in your accounts or from transfers. The Expense Buffer below checks whether the selected account can cover what remains.`;
+    } else if (pace.incomeState === "awaiting") {
+      noteTone = "warn";
+      noteTitle = `${money(pace.budgetIncome)} of income is still expected`;
+      noteCopy = `${expenseTiming} Cash flow so far will remain negative until that income is recorded.`;
+    } else if (pace.incomeState === "partial") {
+      noteTone = "warn";
+      noteTitle = "Some scheduled income is still to come";
+      noteCopy = `${expenseTiming} ${money(pace.actualIncome)} of ${money(
+        pace.budgetIncome,
+      )} scheduled income has been received.`;
+    } else if (pace.incomeState === "unplanned") {
+      noteTone = "good";
+      noteTitle = "Income was received without a scheduled occurrence";
+      noteCopy = `${expenseTiming} ${money(
+        pace.actualIncome,
+      )} is included in cash flow even though no income was planned for this cycle.`;
+    } else {
+      noteTone = "good";
+      noteTitle = "Scheduled income has been received";
+      noteCopy = `${expenseTiming} ${money(pace.actualIncome)} has been received against ${money(
+        pace.budgetIncome,
+      )} scheduled.`;
+    }
+    const note = $("#cycle-pace-note");
+    note.className = `cycle-pace-note tone-${noteTone}`;
+    note.innerHTML = `<strong>${escapeHtml(noteTitle)}</strong><span>${escapeHtml(
+      noteCopy,
+    )}</span>`;
   }
 
   function renderExpenseBuffer(period) {
@@ -4017,6 +4164,7 @@
       scheduleOccurrences,
       scheduleText,
       summaryForPeriod,
+      cyclePaceSnapshot,
       accountBalance,
       transactionAllocations,
       transferDirection,

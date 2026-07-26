@@ -136,19 +136,26 @@
                   <div class="panel-heading">
                     <div>
                       <span class="eyebrow">Cycle pace</span>
-                      <h2>Where this pay is going</h2>
+                      <h2>How this cycle is tracking</h2>
                     </div>
                     <span class="pill" id="cycle-days-left">—</span>
                   </div>
                   <div class="pace-visual">
-                    <div class="pace-ring" id="pace-ring">
+                    <div
+                      class="pace-ring"
+                      id="pace-ring"
+                      role="progressbar"
+                      aria-label="Expense plan used this cycle"
+                      aria-describedby="cycle-pace-note"
+                    >
                       <div>
-                        <strong id="safe-to-spend">$0</strong>
-                        <span>unallocated</span>
+                        <strong id="pace-percentage">0%</strong>
+                        <span id="pace-ring-label">of expense plan spent</span>
                       </div>
                     </div>
                     <div class="pace-legend" id="pace-legend"></div>
                   </div>
+                  <div class="cycle-pace-note" id="cycle-pace-note"></div>
                 </section>
 
                 <section class="panel expense-buffer-panel" id="expense-buffer-panel">

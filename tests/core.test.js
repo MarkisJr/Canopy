@@ -317,6 +317,89 @@ assert.equal(overPlanPace.expensePercent, 150);
 assert.equal(overPlanPace.visualExpenseRatio, 1);
 assert.equal(overPlanPace.overPlan, true);
 assert.equal(overPlanPace.remainingPlanned, 0);
+
+const affordabilityState = core.initialState();
+const affordabilityPeriod = affordabilityState.periods[0];
+affordabilityPeriod.startDate = "2026-03-09";
+affordabilityPeriod.endDate = "2026-03-22";
+affordabilityState.goals = [
+  {
+    id: "goal_contribution",
+    name: "Emergency fund",
+    accountId: "acct_savings",
+    mode: "contribution",
+    targetAmount: 1000,
+    currentAmount: 100,
+    contributionPerPeriod: 300,
+    startDate: "2026-03-01",
+  },
+  {
+    id: "goal_by_date",
+    name: "Holiday",
+    accountId: "acct_savings",
+    mode: "date",
+    targetAmount: 600,
+    currentAmount: 0,
+    endDate: "2026-04-20",
+    startDate: "2026-03-01",
+  },
+  {
+    id: "goal_complete",
+    name: "Completed",
+    accountId: "acct_savings",
+    mode: "contribution",
+    targetAmount: 100,
+    currentAmount: 100,
+    contributionPerPeriod: 50,
+    startDate: "2026-03-01",
+  },
+  {
+    id: "goal_future",
+    name: "Later",
+    accountId: "acct_savings",
+    mode: "contribution",
+    targetAmount: 500,
+    currentAmount: 0,
+    contributionPerPeriod: 50,
+    startDate: "2026-04-01",
+  },
+];
+core.setStateForTest(affordabilityState);
+const affordability = core.savingsCommitmentSnapshot(
+  affordabilityPeriod,
+  "2026-03-20",
+  {
+    budgetIncome: 1000,
+    budgetNet: 450,
+  },
+);
+assert.deepEqual(
+  {
+    plannedSavings: affordability.plannedSavings,
+    availableAfterGoals: affordability.availableAfterGoals,
+    shortfall: affordability.shortfall,
+    status: affordability.status,
+    reason: affordability.reason,
+    goalNames: affordability.goals.map((goal) => goal.name),
+  },
+  {
+    plannedSavings: 500,
+    availableAfterGoals: -50,
+    shortfall: 50,
+    status: "bad",
+    reason: "shortfall",
+    goalNames: ["Emergency fund", "Holiday"],
+  },
+  "active incomplete goals should reduce budgeted net without changing the net calculation itself",
+);
+assert.equal(
+  core.savingsCommitmentSnapshot(affordabilityPeriod, "2026-03-20", {
+    budgetIncome: 0,
+    budgetNet: -100,
+  }).reason,
+  "no-income",
+  "a no-income cycle should warn that goal contributions may rely on carried account balances",
+);
 core.setStateForTest(state);
 
 const transferStats = core.transferStats([

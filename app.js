@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.4.1";
+  const APP_VERSION = "0.5.0";
   const SCHEMA_VERSION = 4;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
@@ -1098,6 +1098,101 @@
     };
   }
 
+  function goalProjection(goal, today = localDate()) {
+    const target = Math.max(0, Number(goal.targetAmount) || 0);
+    const current = Math.max(0, Number(goal.currentAmount) || 0);
+    const remaining = Math.max(0, target - current);
+    const startDate = goal.startDate || today;
+    const intervalDays = payIntervalDays();
+    if (goal.mode === "contribution") {
+      const contribution = Math.max(0, Number(goal.contributionPerPeriod) || 0);
+      const periods = contribution > 0 ? Math.ceil(remaining / contribution) : Infinity;
+      const projectedDate = Number.isFinite(periods)
+        ? addDays(today, periods * intervalDays)
+        : null;
+      return {
+        target,
+        current,
+        remaining,
+        contribution,
+        endDate: projectedDate,
+        durationDays: projectedDate ? daysBetween(today, projectedDate) : Infinity,
+      };
+    }
+    const endDate = goal.endDate || today;
+    const daysRemaining = Math.max(0, daysBetween(today, endDate));
+    const periodsRemaining = Math.max(1, Math.ceil(daysRemaining / intervalDays));
+    return {
+      target,
+      current,
+      remaining,
+      contribution: roundMoney(remaining / periodsRemaining),
+      endDate,
+      durationDays: daysRemaining,
+      startDate,
+    };
+  }
+
+  function savingsCommitmentSnapshot(
+    period = activePeriod(),
+    today = localDate(),
+    summary = summaryForPeriod(period),
+  ) {
+    const goals = state.goals
+      .map((goal) => {
+        const projection = goalProjection(goal, today);
+        const contribution = roundMoney(
+          Math.min(projection.remaining, Math.max(0, projection.contribution)),
+        );
+        return { goal, projection, contribution };
+      })
+      .filter(
+        ({ goal, projection, contribution }) =>
+          projection.remaining >= 0.005 &&
+          contribution >= 0.005 &&
+          (!goal.startDate || goal.startDate <= period.endDate),
+      );
+    const plannedSavings = roundMoney(
+      goals.reduce((total, item) => total + item.contribution, 0),
+    );
+    const budgetedNet = roundMoney(summary.budgetNet);
+    const availableAfterGoals = roundMoney(budgetedNet - plannedSavings);
+    const budgetedIncome = Math.max(0, roundMoney(summary.budgetIncome));
+    let status = "none";
+    let reason = "no-commitments";
+
+    if (plannedSavings >= 0.005) {
+      if (budgetedIncome < 0.005) {
+        status = "warn";
+        reason = "no-income";
+      } else if (availableAfterGoals < -0.005) {
+        status = "bad";
+        reason = "shortfall";
+      } else if (availableAfterGoals <= 0.005) {
+        status = "warn";
+        reason = "fully-allocated";
+      } else {
+        status = "good";
+        reason = "covered";
+      }
+    }
+
+    return {
+      budgetedNet,
+      plannedSavings,
+      availableAfterGoals,
+      shortfall: roundMoney(Math.max(0, -availableAfterGoals)),
+      budgetedIncome,
+      goals: goals.map(({ goal, contribution }) => ({
+        id: goal.id,
+        name: goal.name,
+        contribution,
+      })),
+      status,
+      reason,
+    };
+  }
+
   function varianceStatus(difference, reference) {
     const tolerance = Math.max(5, Math.abs(Number(reference) || 0) * 0.05);
     if (difference > tolerance) return "good";
@@ -1233,6 +1328,7 @@
           </article>`,
       )
       .join("");
+    renderSavingsAffordability(period, summary, today);
 
     const daysLeft = daysBetween(today, period.endDate);
     $("#cycle-days-left").textContent =
@@ -1247,6 +1343,65 @@
     renderUpcoming(period);
     renderDashboardAccounts(period);
     renderRecentTransactions(period);
+  }
+
+  function renderSavingsAffordability(period, summary, today) {
+    const snapshot = savingsCommitmentSnapshot(period, today, summary);
+    const container = $("#savings-affordability-strip");
+    const names = snapshot.goals.map((goal) => goal.name);
+    const goalNames =
+      names.length > 2
+        ? `${names.slice(0, 2).join(", ")} + ${names.length - 2} more`
+        : names.join(" and ");
+    let headline = "No active goal contribution is planned";
+    let detail = "Add a goal when you are ready to give part of your budgeted net a purpose.";
+
+    if (snapshot.reason === "covered") {
+      headline = "Your plan covers this cycle's goal contributions";
+      detail = `${goalNames} ${
+        names.length === 1 ? "is" : "are"
+      } funded with budgeted income after expenses.`;
+    } else if (snapshot.reason === "shortfall") {
+      headline = `Goal commitments are ${money(snapshot.shortfall)} above budgeted net`;
+      detail = `${goalNames} ${
+        names.length === 1 ? "needs" : "need"
+      } more than this cycle's planned surplus. Extend a target date, lower a contribution, or review the plan.`;
+    } else if (snapshot.reason === "fully-allocated") {
+      headline = "Goal commitments use the full budgeted net";
+      detail = `${goalNames} leave no planned breathing room after expenses this cycle.`;
+    } else if (snapshot.reason === "no-income") {
+      headline = "No income is scheduled to fund these goals this cycle";
+      detail = `${goalNames} and planned expenses need ${money(
+        snapshot.shortfall,
+      )} more than this cycle's scheduled income. Money already in your accounts may cover it; check the Expense Buffer before transferring.`;
+    }
+
+    container.className = `savings-affordability-strip tone-${snapshot.status}`;
+    container.innerHTML = `
+      <div class="savings-affordability-copy">
+        <span class="eyebrow">Savings commitments</span>
+        <h2 id="savings-affordability-title">${escapeHtml(headline)}</h2>
+        <p>${escapeHtml(detail)}</p>
+      </div>
+      <div class="savings-affordability-math" aria-label="Savings affordability calculation">
+        <div>
+          <span>Budgeted net</span>
+          <strong>${money(snapshot.budgetedNet)}</strong>
+        </div>
+        <span class="math-operator" aria-hidden="true">−</span>
+        <div>
+          <span>Planned savings</span>
+          <strong>${money(snapshot.plannedSavings)}</strong>
+        </div>
+        <span class="math-operator" aria-hidden="true">=</span>
+        <div class="available-after-goals">
+          <span>Available after goals</span>
+          <strong>${money(snapshot.availableAfterGoals)}</strong>
+        </div>
+      </div>
+      <button class="text-button savings-affordability-action" type="button" data-go-view="goals">
+        ${snapshot.goals.length ? "Review goals" : "Create a goal"}
+      </button>`;
   }
 
   function renderCyclePace(period, summary, today) {
@@ -2189,41 +2344,6 @@
           )
           .join("")
       : emptyState("No categories", "Create categories to make patterns easier to see.", "•");
-  }
-
-  function goalProjection(goal) {
-    const target = Math.max(0, Number(goal.targetAmount) || 0);
-    const current = Math.max(0, Number(goal.currentAmount) || 0);
-    const remaining = Math.max(0, target - current);
-    const startDate = goal.startDate || localDate();
-    const intervalDays = payIntervalDays();
-    if (goal.mode === "contribution") {
-      const contribution = Math.max(0, Number(goal.contributionPerPeriod) || 0);
-      const periods = contribution > 0 ? Math.ceil(remaining / contribution) : Infinity;
-      const projectedDate = Number.isFinite(periods)
-        ? addDays(localDate(), periods * intervalDays)
-        : null;
-      return {
-        target,
-        current,
-        remaining,
-        contribution,
-        endDate: projectedDate,
-        durationDays: projectedDate ? daysBetween(localDate(), projectedDate) : Infinity,
-      };
-    }
-    const endDate = goal.endDate || localDate();
-    const daysRemaining = Math.max(0, daysBetween(localDate(), endDate));
-    const periodsRemaining = Math.max(1, Math.ceil(daysRemaining / intervalDays));
-    return {
-      target,
-      current,
-      remaining,
-      contribution: roundMoney(remaining / periodsRemaining),
-      endDate,
-      durationDays: daysRemaining,
-      startDate,
-    };
   }
 
   function goalTransfers(goal, period = null) {
@@ -4165,6 +4285,8 @@
       scheduleText,
       summaryForPeriod,
       cyclePaceSnapshot,
+      goalProjection,
+      savingsCommitmentSnapshot,
       accountBalance,
       transactionAllocations,
       transferDirection,

@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.5.0";
+  const APP_VERSION = "0.6.0";
   const SCHEMA_VERSION = 4;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
@@ -292,6 +292,10 @@
     );
   }
 
+  function periodById(id) {
+    return state.periods.find((period) => period.id === id);
+  }
+
   function payIntervalDays() {
     const value = Math.max(1, Number(state.settings.payIntervalValue) || 1);
     return state.settings.payIntervalUnit === "weeks" ? value * 7 : value;
@@ -442,6 +446,7 @@
   }
 
   function transactionEffect(transaction, accountId) {
+    if (!transaction) return 0;
     const amount = Number(transaction.amount) || 0;
     if (transaction.type === "expense") return transaction.accountId === accountId ? -amount : 0;
     if (transaction.type === "refund" || transaction.type === "income") {
@@ -1002,27 +1007,7 @@
       <button class="text-button" type="button" data-go-view="transactions">Review transactions</button>`;
   }
 
-  function summaryForPeriod(period = activePeriod()) {
-    if (period.status === "archived" && period.archiveSummary) return clone(period.archiveSummary);
-
-    const budgetIncome = state.incomeSources.reduce(
-      (sum, item) =>
-        sum +
-        scheduleOccurrences(item, period.startDate, period.endDate).reduce(
-          (subtotal, occurrence) => subtotal + occurrence.amount,
-          0,
-        ),
-      0,
-    );
-    const budgetExpenses = state.expenses.reduce(
-      (sum, item) =>
-        sum +
-        scheduleOccurrences(item, period.startDate, period.endDate).reduce(
-          (subtotal, occurrence) => subtotal + occurrence.amount,
-          0,
-        ),
-      0,
-    );
+  function periodSummaryFromTransactions(period, budgetIncome, budgetExpenses) {
     const transactions = periodTransactions(period);
     const actualIncome = transactions
       .filter((transaction) => transaction.type === "income")
@@ -1045,6 +1030,134 @@
       budgetNet: roundMoney(budgetIncome - budgetExpenses),
       actualNet: roundMoney(actualIncome - netActualExpenses),
       netDifference: roundMoney(actualIncome - netActualExpenses - (budgetIncome - budgetExpenses)),
+    };
+  }
+
+  function plannedTotalsForPeriod(period) {
+    const budgetIncome = state.incomeSources.reduce(
+      (sum, item) =>
+        sum +
+        scheduleOccurrences(item, period.startDate, period.endDate).reduce(
+          (subtotal, occurrence) => subtotal + occurrence.amount,
+          0,
+        ),
+      0,
+    );
+    const budgetExpenses = state.expenses.reduce(
+      (sum, item) =>
+        sum +
+        scheduleOccurrences(item, period.startDate, period.endDate).reduce(
+          (subtotal, occurrence) => subtotal + occurrence.amount,
+          0,
+        ),
+      0,
+    );
+    return { budgetIncome: roundMoney(budgetIncome), budgetExpenses: roundMoney(budgetExpenses) };
+  }
+
+  function summaryForPeriod(period = activePeriod()) {
+    if (period.status === "archived" && period.archiveSummary) return clone(period.archiveSummary);
+    const { budgetIncome, budgetExpenses } = plannedTotalsForPeriod(period);
+    return periodSummaryFromTransactions(period, budgetIncome, budgetExpenses);
+  }
+
+  function archivedBudgetTotal(period, type) {
+    const summaryKey = type === "income" ? "budgetIncome" : "budgetExpenses";
+    const cached = Number(period.archiveSummary?.[summaryKey]);
+    if (Number.isFinite(cached)) return cached;
+    const occurrences = period.archiveOccurrences?.[type];
+    if (Array.isArray(occurrences)) {
+      return roundMoney(
+        occurrences.reduce((total, occurrence) => total + Number(occurrence.amount || 0), 0),
+      );
+    }
+    return plannedTotalsForPeriod(period)[summaryKey];
+  }
+
+  function transactionAccountDeltas(previousTransaction, nextTransaction) {
+    const accountIds = new Set(
+      [
+        previousTransaction?.accountId,
+        previousTransaction?.toAccountId,
+        nextTransaction?.accountId,
+        nextTransaction?.toAccountId,
+      ].filter(Boolean),
+    );
+    return new Map(
+      [...accountIds]
+        .map((accountId) => [
+          accountId,
+          roundMoney(
+            transactionEffect(nextTransaction, accountId) -
+              transactionEffect(previousTransaction, accountId),
+          ),
+        ])
+        .filter(([, delta]) => Math.abs(delta) >= 0.005),
+    );
+  }
+
+  function refreshArchivedPeriodAfterTransactionChange(previousTransaction, nextTransaction) {
+    const periodId = previousTransaction?.periodId || nextTransaction?.periodId;
+    const period = periodById(periodId);
+    if (!period || period.status !== "archived") {
+      return { refreshed: false, periodId, accountDeltas: {} };
+    }
+
+    const budgetIncome = archivedBudgetTotal(period, "income");
+    const budgetExpenses = archivedBudgetTotal(period, "expenses");
+    period.archiveSummary = periodSummaryFromTransactions(period, budgetIncome, budgetExpenses);
+
+    const accountDeltas = transactionAccountDeltas(previousTransaction, nextTransaction);
+    const orderedPeriods = state.periods
+      .slice()
+      .sort(
+        (a, b) =>
+          String(a.startDate || "").localeCompare(String(b.startDate || "")) ||
+          String(a.createdAt || "").localeCompare(String(b.createdAt || "")),
+      );
+    const editedIndex = orderedPeriods.findIndex((item) => item.id === period.id);
+
+    if (!period.closingBalances || typeof period.closingBalances !== "object") {
+      period.closingBalances = Object.fromEntries(
+        state.accounts.map((account) => [account.id, accountBalance(account.id, period)]),
+      );
+    } else {
+      accountDeltas.forEach((delta, accountId) => {
+        period.closingBalances[accountId] = roundMoney(
+          (Number(period.closingBalances[accountId]) || 0) + delta,
+        );
+      });
+    }
+
+    orderedPeriods.slice(editedIndex + 1).forEach((laterPeriod) => {
+      if (!laterPeriod.openingBalances || typeof laterPeriod.openingBalances !== "object") {
+        laterPeriod.openingBalances = {};
+      }
+      accountDeltas.forEach((delta, accountId) => {
+        laterPeriod.openingBalances[accountId] = roundMoney(
+          (Number(laterPeriod.openingBalances[accountId]) || 0) + delta,
+        );
+      });
+      if (laterPeriod.status !== "archived") return;
+      if (!laterPeriod.closingBalances || typeof laterPeriod.closingBalances !== "object") {
+        laterPeriod.closingBalances = Object.fromEntries(
+          state.accounts.map((account) => [account.id, accountBalance(account.id, laterPeriod)]),
+        );
+        return;
+      }
+      accountDeltas.forEach((delta, accountId) => {
+        laterPeriod.closingBalances[accountId] = roundMoney(
+          (Number(laterPeriod.closingBalances[accountId]) || 0) + delta,
+        );
+      });
+    });
+
+    period.archiveEditedAt = new Date().toISOString();
+    period.archiveRevision = Math.max(0, Number(period.archiveRevision) || 0) + 1;
+    return {
+      refreshed: true,
+      periodId: period.id,
+      accountDeltas: Object.fromEntries(accountDeltas),
     };
   }
 
@@ -2888,6 +3001,11 @@
   }
 
   function renderArchive() {
+    const expandedPeriodIds = new Set(
+      $$("#archive-list details[open][data-archive-period-id]").map(
+        (details) => details.dataset.archivePeriodId,
+      ),
+    );
     const archived = state.periods
       .filter((period) => period.status === "archived")
       .sort((a, b) => b.endDate.localeCompare(a.endDate));
@@ -2895,9 +3013,12 @@
       ? archived.map(archiveCard).join("")
       : emptyState(
           "No archived cycles",
-          "When you close a pay cycle, its plan, transactions, balances, and discrepancies will stay here.",
-          '<span class="archive-box-icon empty-archive-box" aria-hidden="true"></span>',
-        );
+           "When you close a pay cycle, its plan, transactions, balances, and discrepancies will stay here.",
+           '<span class="archive-box-icon empty-archive-box" aria-hidden="true"></span>',
+         );
+    $$("#archive-list details[data-archive-period-id]").forEach((details) => {
+      details.open = expandedPeriodIds.has(details.dataset.archivePeriodId);
+    });
   }
 
   function archiveCard(period) {
@@ -2909,7 +3030,7 @@
       (adjustment) => adjustment.periodId === period.id && adjustment.resolved !== true,
     );
     return `
-      <details class="archive-card">
+      <details class="archive-card" data-archive-period-id="${escapeHtml(period.id)}">
         <summary class="archive-summary">
           <div>
             <span>Pay cycle</span>
@@ -2923,6 +3044,19 @@
           <span class="pill">${transactions.length} entries</span>
         </summary>
         <div class="archive-details">
+          <div class="archive-edit-guidance">
+            <div>
+              <strong>Late corrections are supported</strong>
+              <span>Edit a transaction to refresh this cycle's cached totals and carry its account balance change forward. It will not count as current-cycle spending.</span>
+            </div>
+            ${
+              period.archiveEditedAt
+                ? `<span class="pill">Corrected ${formatCompactDate(
+                    localDate(new Date(period.archiveEditedAt)),
+                  )}</span>`
+                : ""
+            }
+          </div>
           ${
             discrepancies.length
               ? `<div class="callout warning">${discrepancies.length} unresolved balance difference${
@@ -2934,7 +3068,7 @@
           }
           <div class="table-scroll">
             <table class="data-table">
-              <thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Type</th><th class="numeric">Amount</th></tr></thead>
+              <thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Type</th><th class="numeric">Amount</th><th><span class="sr-only">Actions</span></th></tr></thead>
               <tbody>
                 ${
                   transactions.length
@@ -2958,11 +3092,18 @@
                                 : transferDirection(transaction) === "savings-out"
                                   ? "status-warn"
                                   : ""
-                            }">${escapeHtml(presentation.prefix)}${money(transaction.amount)}</td>
+                             }">${escapeHtml(presentation.prefix)}${money(transaction.amount)}</td>
+                            <td class="row-actions">
+                              <button type="button" data-edit-transaction="${escapeHtml(
+                                transaction.id,
+                              )}" aria-label="Edit archived transaction ${escapeHtml(
+                                transaction.description,
+                              )}">Edit</button>
+                            </td>
                           </tr>`;
                         })
                         .join("")
-                    : '<tr><td colspan="5">No transactions in this cycle.</td></tr>'
+                    : '<tr><td colspan="6">No transactions in this cycle.</td></tr>'
                 }
               </tbody>
             </table>
@@ -3036,7 +3177,10 @@
     const transaction = transactionId
       ? state.transactions.find((item) => item.id === transactionId)
       : null;
+    const transactionPeriod = transaction ? periodById(transaction.periodId) : activePeriod();
+    const isArchivedEdit = transactionPeriod?.status === "archived";
     form.reset();
+    form.dataset.archivedEdit = String(isArchivedEdit);
     form.elements.id.value = transaction?.id || "";
     form.elements.date.value = transaction?.date || localDate();
     form.elements.type.value = transaction?.type || "expense";
@@ -3050,12 +3194,32 @@
     form.elements.goalId.value = transaction?.goalId || "";
     form.elements.categoryId.value = transaction?.categoryId || "";
     form.elements.isSplit.checked = Boolean(transaction?.splits?.length);
-    $("#transaction-dialog-title").textContent = transaction ? "Edit transaction" : "Add transaction";
+    form.elements.date.min = isArchivedEdit ? transactionPeriod.startDate : "";
+    form.elements.date.max = isArchivedEdit ? transactionPeriod.endDate : "";
+    $("#transaction-dialog-title").textContent = isArchivedEdit
+      ? "Edit archived transaction"
+      : transaction
+        ? "Edit transaction"
+        : "Add transaction";
+    const archiveNotice = $("#transaction-archive-notice");
+    archiveNotice.hidden = !isArchivedEdit;
+    archiveNotice.innerHTML = isArchivedEdit
+      ? `<strong>${formatDate(transactionPeriod.startDate)} – ${formatDate(
+          transactionPeriod.endDate,
+        )}</strong><span>Saving recalculates this archived cycle and carries the account difference forward to current balances. Current-cycle income and spending remain separate. For split transactions, changing a line updates the total automatically.</span>`
+      : "";
+    $("#save-transaction").textContent = isArchivedEdit
+      ? "Save archive correction"
+      : "Save transaction";
     $("#delete-transaction").hidden = !transaction;
     syncTransactionTypeFields();
     renderSplitLines(transaction?.splits || []);
     showDialog(dialog);
-    setTimeout(() => form.elements.description.focus(), 20);
+    dialog.scrollTop = 0;
+    setTimeout(() => {
+      if (isArchivedEdit) dialog.scrollTop = 0;
+      else form.elements.description.focus();
+    }, 20);
   }
 
   function syncTransactionTypeFields() {
@@ -3167,6 +3331,13 @@
     element.classList.toggle("is-invalid", Math.abs(total - expected) >= 0.005);
   }
 
+  function syncArchivedAmountToSplitTotal() {
+    const form = $("#transaction-form");
+    if (form.dataset.archivedEdit !== "true" || !form.elements.isSplit.checked) return;
+    const total = collectSplits().reduce((sum, split) => sum + split.amount, 0);
+    if (total > 0) form.elements.amount.value = roundMoney(total).toFixed(2);
+  }
+
   function submitTransaction(form) {
     const data = new FormData(form);
     const id = String(data.get("id") || "");
@@ -3233,13 +3404,20 @@
 
     mutate(
       transactionMutationMessage(
-        existing ? "Transaction updated." : "Transaction added.",
+        existing && periodById(existing.periodId)?.status === "archived"
+          ? "Archived transaction updated. Later account balances were refreshed."
+          : existing
+            ? "Transaction updated."
+            : "Transaction added.",
         transaction,
       ),
       () => {
-      if (existing) Object.assign(existing, transaction);
-      else state.transactions.push(transaction);
-      applyGoalTransferChange(previousTransaction, transaction);
+        if (existing) Object.assign(existing, transaction);
+        else state.transactions.push(transaction);
+        applyGoalTransferChange(previousTransaction, transaction);
+        if (existing) {
+          refreshArchivedPeriodAfterTransactionChange(previousTransaction, transaction);
+        }
       },
     );
     return true;
@@ -3969,10 +4147,15 @@
   function deleteTransaction(transactionId) {
     const transaction = state.transactions.find((item) => item.id === transactionId);
     if (!transaction) return;
-    if (!window.confirm(`Delete “${transaction.description}”?`)) return;
-    mutate("Transaction deleted.", () => {
+    const isArchived = periodById(transaction.periodId)?.status === "archived";
+    const prompt = isArchived
+      ? `Delete “${transaction.description}” from its archived cycle? This will refresh later account balances.`
+      : `Delete “${transaction.description}”?`;
+    if (!window.confirm(prompt)) return;
+    mutate(isArchived ? "Archived transaction deleted. Later account balances were refreshed." : "Transaction deleted.", () => {
       applyGoalTransferChange(transaction, null);
       state.transactions = state.transactions.filter((item) => item.id !== transactionId);
+      refreshArchivedPeriodAfterTransactionChange(transaction, null);
     });
     closeDialog($("#transaction-dialog"));
   }
@@ -4154,11 +4337,15 @@
       $("#split-lines").insertAdjacentHTML("beforeend", splitLineTemplate());
       updateSplitTotal();
     });
-    $("#split-lines").addEventListener("input", updateSplitTotal);
+    $("#split-lines").addEventListener("input", (event) => {
+      if (event.target.matches("[data-split-amount]")) syncArchivedAmountToSplitTotal();
+      updateSplitTotal();
+    });
     $("#split-lines").addEventListener("click", (event) => {
       const remove = event.target.closest("[data-remove-split]");
       if (remove) {
         remove.closest(".split-line").remove();
+        syncArchivedAmountToSplitTotal();
         updateSplitTotal();
       }
     });
@@ -4284,6 +4471,7 @@
       scheduleOccurrences,
       scheduleText,
       summaryForPeriod,
+      refreshArchivedPeriodAfterTransactionChange,
       cyclePaceSnapshot,
       goalProjection,
       savingsCommitmentSnapshot,

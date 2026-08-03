@@ -400,6 +400,167 @@ assert.equal(
   "no-income",
   "a no-income cycle should warn that goal contributions may rely on carried account balances",
 );
+
+const archiveEditState = core.initialState();
+const firstArchivedPeriod = archiveEditState.periods[0];
+firstArchivedPeriod.id = "period_archived_first";
+firstArchivedPeriod.startDate = "2026-01-01";
+firstArchivedPeriod.endDate = "2026-01-14";
+firstArchivedPeriod.status = "archived";
+firstArchivedPeriod.openingBalances = {
+  acct_everyday: 1000,
+  acct_bills: 0,
+  acct_savings: 0,
+};
+firstArchivedPeriod.closingBalances = {
+  acct_everyday: 900,
+  acct_bills: 0,
+  acct_savings: 0,
+};
+firstArchivedPeriod.archiveSummary = {
+  budgetIncome: 0,
+  actualIncome: 0,
+  incomeDifference: 0,
+  budgetExpenses: 120,
+  actualExpenses: 100,
+  expenseDifference: 20,
+  budgetNet: -120,
+  actualNet: -100,
+  netDifference: 20,
+};
+firstArchivedPeriod.archiveOccurrences = {
+  income: [],
+  expenses: [{ date: "2026-01-08", amount: 120, itemId: "expense_trip", name: "Trip" }],
+};
+const secondArchivedPeriod = {
+  id: "period_archived_second",
+  startDate: "2026-01-15",
+  endDate: "2026-01-28",
+  status: "archived",
+  openingBalances: { acct_everyday: 900, acct_bills: 0, acct_savings: 0 },
+  closingBalances: { acct_everyday: 1100, acct_bills: 0, acct_savings: 0 },
+  archiveSummary: {
+    budgetIncome: 200,
+    actualIncome: 200,
+    incomeDifference: 0,
+    budgetExpenses: 0,
+    actualExpenses: 0,
+    expenseDifference: 0,
+    budgetNet: 200,
+    actualNet: 200,
+    netDifference: 0,
+  },
+  archiveOccurrences: { income: [{ date: "2026-01-15", amount: 200 }], expenses: [] },
+  createdAt: "2026-01-15T00:00:00.000Z",
+};
+const currentAfterArchives = {
+  id: "period_current_after_archives",
+  startDate: "2026-01-29",
+  endDate: "2026-02-11",
+  status: "active",
+  openingBalances: { acct_everyday: 1100, acct_bills: 0, acct_savings: 0 },
+  createdAt: "2026-01-29T00:00:00.000Z",
+};
+const archivedSplitBefore = {
+  id: "archived_split_transaction",
+  periodId: firstArchivedPeriod.id,
+  date: "2026-01-08",
+  type: "expense",
+  description: "International purchase and fee",
+  amount: 100,
+  accountId: "acct_everyday",
+  categoryId: "cat_fun",
+  splits: [
+    { id: "split_purchase", categoryId: "cat_fun", amount: 90 },
+    { id: "split_fee", categoryId: "cat_bills", amount: 10 },
+  ],
+  createdAt: "2026-01-08T00:00:00.000Z",
+};
+const secondPeriodIncome = {
+  id: "second_period_income",
+  periodId: secondArchivedPeriod.id,
+  date: "2026-01-15",
+  type: "income",
+  description: "Pay",
+  amount: 200,
+  accountId: "acct_everyday",
+  categoryId: "cat_income",
+  splits: [],
+  createdAt: "2026-01-15T00:00:00.000Z",
+};
+const currentExpense = {
+  id: "current_period_expense",
+  periodId: currentAfterArchives.id,
+  date: "2026-01-30",
+  type: "expense",
+  description: "Current groceries",
+  amount: 50,
+  accountId: "acct_everyday",
+  categoryId: "cat_groceries",
+  splits: [],
+  createdAt: "2026-01-30T00:00:00.000Z",
+};
+archiveEditState.periods = [firstArchivedPeriod, secondArchivedPeriod, currentAfterArchives];
+archiveEditState.metadata.activePeriodId = currentAfterArchives.id;
+archiveEditState.transactions = [archivedSplitBefore, secondPeriodIncome, currentExpense];
+archiveEditState.adjustments = [];
+core.setStateForTest(archiveEditState);
+assert.equal(core.accountBalance("acct_everyday", currentAfterArchives), 1050);
+
+const archivedSplitAfter = {
+  ...archivedSplitBefore,
+  amount: 130,
+  splits: [
+    archivedSplitBefore.splits[0],
+    { ...archivedSplitBefore.splits[1], amount: 40 },
+  ],
+  updatedAt: "2026-02-01T00:00:00.000Z",
+};
+archiveEditState.transactions[0] = archivedSplitAfter;
+core.setStateForTest(archiveEditState);
+const archiveRefresh = core.refreshArchivedPeriodAfterTransactionChange(
+  archivedSplitBefore,
+  archivedSplitAfter,
+);
+assert.deepEqual(archiveRefresh.accountDeltas, { acct_everyday: -30 });
+assert.equal(core.summaryForPeriod(firstArchivedPeriod).actualExpenses, 130);
+assert.equal(
+  core.summaryForPeriod(firstArchivedPeriod).budgetExpenses,
+  120,
+  "archive corrections should preserve the plan cached when the cycle was closed",
+);
+assert.equal(firstArchivedPeriod.closingBalances.acct_everyday, 870);
+assert.equal(secondArchivedPeriod.openingBalances.acct_everyday, 870);
+assert.equal(secondArchivedPeriod.closingBalances.acct_everyday, 1070);
+assert.equal(currentAfterArchives.openingBalances.acct_everyday, 1070);
+assert.equal(
+  core.accountBalance("acct_everyday", currentAfterArchives),
+  1020,
+  "an archived fee correction should flow into the current account balance",
+);
+assert.equal(
+  core.summaryForPeriod(secondArchivedPeriod).actualIncome,
+  200,
+  "later archived summaries should remain cached and untouched",
+);
+assert.equal(firstArchivedPeriod.archiveRevision, 1);
+
+archiveEditState.transactions = archiveEditState.transactions.filter(
+  (transaction) => transaction.id !== archivedSplitAfter.id,
+);
+core.setStateForTest(archiveEditState);
+core.refreshArchivedPeriodAfterTransactionChange(archivedSplitAfter, null);
+assert.equal(core.summaryForPeriod(firstArchivedPeriod).actualExpenses, 0);
+assert.equal(firstArchivedPeriod.closingBalances.acct_everyday, 1000);
+assert.equal(secondArchivedPeriod.openingBalances.acct_everyday, 1000);
+assert.equal(secondArchivedPeriod.closingBalances.acct_everyday, 1200);
+assert.equal(currentAfterArchives.openingBalances.acct_everyday, 1200);
+assert.equal(
+  core.accountBalance("acct_everyday", currentAfterArchives),
+  1150,
+  "deleting an archived transaction should reverse its balance effect through the current cycle",
+);
+assert.equal(firstArchivedPeriod.archiveRevision, 2);
 core.setStateForTest(state);
 
 const transferStats = core.transferStats([

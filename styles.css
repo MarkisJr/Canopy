@@ -2551,8 +2551,40 @@ textarea {
   border-top: 1px solid var(--border);
 }
 
+.archive-edit-guidance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--surface));
+}
+
+.archive-edit-guidance strong,
+.archive-edit-guidance span:not(.pill) {
+  display: block;
+}
+
+.archive-edit-guidance strong {
+  font-size: 0.78rem;
+}
+
+.archive-edit-guidance span:not(.pill) {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.archive-edit-guidance .pill {
+  flex: 0 0 auto;
+}
+
 .archive-details .data-table {
-  min-width: 700px;
+  min-width: 760px;
 }
 
 .settings-grid {
@@ -2747,6 +2779,28 @@ textarea {
 
 .dialog-copy {
   margin: 18px 22px 0;
+}
+
+.archive-edit-notice {
+  display: grid;
+  gap: 3px;
+  margin: 18px 22px 0;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--warn) 36%, var(--border));
+  border-left: 3px solid var(--warn);
+  border-radius: 10px;
+  background: var(--warn-soft);
+}
+
+.archive-edit-notice strong {
+  color: var(--warn);
+  font-size: 0.78rem;
+}
+
+.archive-edit-notice span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
 }
 
 .dialog-actions {
@@ -3174,6 +3228,11 @@ textarea {
 
   .panel {
     padding: 18px;
+  }
+
+  .archive-edit-guidance {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .savings-affordability-strip {

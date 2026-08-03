@@ -27,7 +27,8 @@ Chrome, Edge, Firefox, Safari, and other modern browsers can use the app and exp
 - Budgeted, actual, and difference scorecards for income, expenses, and net cash
 - Outstanding-first cycle schedule with partial, exact, over-budget, underpaid, and overpaid status
 - Manual account reconciliation with visible, cycle-specific unexplained differences
-- Cycle archiving with balances, transactions, totals, and discrepancies retained
+- Cycle archiving with balances, transactions, totals, and discrepancies retained; archived
+  transactions can be corrected later with their account changes carried into current balances
 - Savings goals planned either by finish date or contribution per pay cycle
 - Optional transfer-to-goal links so actual savings deposits increase progress and withdrawals from
   the goal account reduce it

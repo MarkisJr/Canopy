@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const core = require("../app.js");
 
 const state = core.initialState();
-assert.equal(state.metadata.appVersion, "0.7.0");
+assert.equal(state.metadata.appVersion, "0.7.1");
 assert.equal(
   state.settings.checkForUpdates,
   true,

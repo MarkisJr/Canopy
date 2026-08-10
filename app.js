@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.7.0";
+  const APP_VERSION = "0.7.1";
   const SCHEMA_VERSION = 4;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";

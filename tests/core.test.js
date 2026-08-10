@@ -4,6 +4,65 @@ const assert = require("node:assert/strict");
 const core = require("../app.js");
 
 const state = core.initialState();
+assert.equal(state.metadata.appVersion, "0.7.0");
+assert.equal(
+  state.settings.checkForUpdates,
+  true,
+  "new installations should offer automatic update checks by default",
+);
+assert.equal(core.normaliseVersion("v1.2.3"), "1.2.3");
+assert.equal(core.normaliseVersion("version 1.2"), "");
+assert.equal(core.compareVersions("0.7.0", "0.6.9"), 1);
+assert.equal(core.compareVersions("1.0.0", "0.99.9"), 1);
+assert.equal(core.compareVersions("0.7.0", "v0.7.0"), 0);
+assert.deepEqual(core.validatedUpdateManifest({ version: "v0.8.0" }), {
+  version: "0.8.0",
+});
+assert.equal(core.validatedUpdateManifest('{"version":"0.8.1"}').version, "0.8.1");
+assert.equal(core.versionFromAppSource('const APP_VERSION = "0.6.0";'), "0.6.0");
+assert.equal(
+  core.versionFromUpdateResponse('{"version":"0.8.2"}', "manifest"),
+  "0.8.2",
+);
+assert.equal(
+  core.versionFromUpdateResponse('const APP_VERSION = "0.6.1";', "source"),
+  "0.6.1",
+);
+assert.equal(
+  core.updatePlatform(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Win32",
+  ),
+  "windows",
+);
+assert.equal(
+  core.updatePlatform(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+    "MacIntel",
+  ),
+  "macos",
+);
+assert.equal(
+  core.updatePlatform("Mozilla/5.0 (X11; Linux x86_64) Firefox/142.0", "Linux x86_64"),
+  "linux",
+);
+assert.equal(
+  core.updatePlatform("Mozilla/5.0 (Linux; Android 15) Chrome/139.0 Mobile", "Linux armv8l"),
+  "other",
+  "a mobile Android browser should not be instructed to run the Linux updater",
+);
+assert.equal(
+  core.updateScriptForPlatform("windows").filename,
+  "update-canopy-windows.cmd",
+);
+assert.equal(
+  core.updateScriptForPlatform("macos").filename,
+  "update-canopy-macos.command",
+);
+assert.equal(
+  core.updateScriptForPlatform("linux").filename,
+  "update-canopy-linux.sh",
+);
 const period = state.periods[0];
 period.startDate = "2026-03-09";
 period.endDate = "2026-03-22";

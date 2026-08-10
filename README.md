@@ -34,6 +34,7 @@ Chrome, Edge, Firefox, Safari, and other modern browsers can use the app and exp
   the goal account reduce it
 - Goal pace and period/month comparison charts drawn locally by the browser
 - Power dark, forest fern, and blush stationery themes
+- Optional once-daily GitHub version checks with a platform-specific updater prompt
 - A required external JSON backup every 48 hours, plus portable JSON import
 
 The schedule engine counts an expense only when its due date falls in the active cycle. A monthly
@@ -46,9 +47,11 @@ Uncategorised so those amounts remain visible in reporting.
 
 ## Data and privacy
 
-The normal data store is one human-readable JSON object saved in browser storage. Nothing is sent
-over the network. Browser storage is the working copy, not a durable backup: clearing site data,
-resetting a browser profile, or some privacy tools can erase it.
+The normal data store is one human-readable JSON object saved in browser storage. Budget data is
+never sent over the network. When automatic update checks are enabled, Canopy makes one request to
+GitHub at most once per day to read `version.json`; this can be disabled in **Settings**, and failed
+or offline checks never interrupt the app. Browser storage is the working copy, not a durable
+backup: clearing site data, resetting a browser profile, or some privacy tools can erase it.
 
 Canopy therefore requires an external export at least every 48 hours. When the deadline passes, a
 modal blocks the app until **Export data backup** is pressed. It suggests a filename containing the
@@ -91,6 +94,11 @@ The scripts check for Git, a valid repository, an `origin` remote, and local cha
 `git pull --ff-only`. They never reset local files. If Git is unavailable or the update cannot be
 applied safely, the terminal displays an error and stops.
 
+When a newer version is published, Canopy can detect it while the device is online and show the
+correct updater filename for Windows, macOS, or Linux. The browser deliberately cannot launch that
+local script: the user must open the installed Canopy folder and run it. Dismissing the notice
+snoozes it for one day.
+
 A safe update routine for users is:
 
 1. Export a current JSON backup.
@@ -120,6 +128,11 @@ git commit -m "Describe the Canopy update"
 git push
 ```
 
+Before publishing a release, update both `APP_VERSION` near the top of `app.js` and the version in
+`version.json`. Canopy compares those values using `major.minor.patch` version numbers.
+Until an older installation has received the release containing `version.json`, its update check
+can read the published `APP_VERSION` from `app.js` as a compatibility fallback.
+
 Friends should install Canopy with `git clone` rather than copying the files manually. A clone
 automatically receives the `origin` remote and upstream branch required by the updater.
 
@@ -137,7 +150,7 @@ The exported file includes:
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "metadata": {
     "lastExternalBackupAt": "2026-07-23T08:00:00.000Z",
     "backupWindowStartedAt": "2026-07-23T08:00:00.000Z"

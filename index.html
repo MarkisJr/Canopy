@@ -625,6 +625,34 @@
               </section>
             </div>
 
+            <section class="panel updates-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">Application updates</span>
+                  <h2>Keep Canopy current</h2>
+                </div>
+                <span class="pill" id="update-status-pill">Not checked</span>
+              </div>
+              <div class="update-settings-layout">
+                <div>
+                  <p class="settings-copy">
+                    Canopy can ask GitHub for the latest version once per day. No budget data is
+                    transmitted, and the app continues normally whenever it is offline.
+                  </p>
+                  <label class="checkbox-label update-check-toggle">
+                    <input id="automatic-update-checks" type="checkbox" />
+                    <span>Automatically check GitHub for Canopy updates</span>
+                  </label>
+                </div>
+                <div class="update-settings-actions">
+                  <button class="quiet-button" id="check-for-updates" type="button">
+                    Check now
+                  </button>
+                  <div class="data-health" id="update-status-detail"></div>
+                </div>
+              </div>
+            </section>
+
             <section class="panel shortcuts-panel">
               <div class="panel-heading">
                 <div>
@@ -829,6 +857,39 @@
           <button class="primary-button" id="required-export-data" type="button">
             Export data backup
           </button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="app-dialog small-dialog update-available-dialog" id="update-available-dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="eyebrow">Update available</span>
+          <h2>A newer Canopy is ready</h2>
+        </div>
+        <button class="icon-button" type="button" data-dismiss-update aria-label="Remind me later">×</button>
+      </div>
+      <div class="update-available-content">
+        <div class="update-version-row">
+          <p id="update-version-copy">A newer version is available.</p>
+          <span class="pill" id="update-platform-pill">Desktop detected</span>
+        </div>
+        <ol class="update-steps">
+          <li>Export a current data backup and close the Canopy tab.</li>
+          <li>Open the folder where Canopy is installed.</li>
+          <li>
+            Find <code id="update-script-name">the platform updater</code>.
+            <span id="update-script-action"></span>
+          </li>
+          <li>When the updater finishes, reopen <code>index.html</code>.</li>
+        </ol>
+        <div class="update-safety-note">
+          Your browser cannot run local scripts for you. The updater checks for Git, protects local
+          changes, and uses a fast-forward-only pull.
+        </div>
+        <div class="dialog-actions">
+          <button class="quiet-button" type="button" data-dismiss-update>Remind me tomorrow</button>
+          <button class="primary-button" type="button" data-dismiss-update>Got it</button>
         </div>
       </div>
     </dialog>

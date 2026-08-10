@@ -1736,6 +1736,12 @@ main {
   color: var(--bad);
 }
 
+.pill.warn {
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
 .type-badge.transfer {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   background: var(--accent-soft);
@@ -2593,6 +2599,38 @@ textarea {
   gap: 14px;
 }
 
+.updates-panel {
+  margin-top: 14px;
+}
+
+.update-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+  align-items: end;
+  gap: 28px;
+}
+
+.update-settings-layout .settings-copy {
+  margin-bottom: 14px;
+}
+
+.update-check-toggle {
+  width: fit-content;
+}
+
+.update-settings-actions {
+  display: grid;
+  justify-items: end;
+  gap: 10px;
+}
+
+.update-settings-actions .data-health {
+  width: 100%;
+  margin-top: 0;
+  padding-top: 10px;
+  text-align: right;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2818,6 +2856,62 @@ textarea {
 
 .small-dialog {
   width: min(560px, calc(100vw - 28px));
+}
+
+.update-available-content {
+  padding: 20px 22px 0;
+}
+
+.update-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.update-version-row p {
+  margin: 0;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.update-steps {
+  display: grid;
+  gap: 11px;
+  margin: 20px 0;
+  padding-left: 24px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.update-steps li::marker {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.update-steps code,
+.update-safety-note code {
+  color: var(--text);
+}
+
+.update-steps span {
+  display: block;
+  margin-top: 3px;
+}
+
+.update-safety-note {
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.update-available-content .dialog-actions {
+  margin: 20px -22px 0;
 }
 
 .backup-required-content {
@@ -3228,6 +3322,29 @@ textarea {
 
   .panel {
     padding: 18px;
+  }
+
+  .update-settings-layout {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+
+  .update-settings-actions {
+    justify-items: stretch;
+  }
+
+  .update-settings-actions .data-health {
+    text-align: left;
+  }
+
+  .update-version-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .update-available-content .dialog-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
   }
 
   .archive-edit-guidance {

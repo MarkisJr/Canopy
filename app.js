@@ -1,11 +1,22 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.6.0";
+  const APP_VERSION = "0.7.0";
   const SCHEMA_VERSION = 4;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
   const EXTERNAL_BACKUP_INTERVAL_MS = 48 * 60 * 60 * 1000;
+  const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const UPDATE_RETRY_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const UPDATE_REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const UPDATE_MANIFEST_URL =
+    "https://api.github.com/repos/MarkisJr/Canopy/contents/version.json?ref=main";
+  const UPDATE_APP_SOURCE_URL =
+    "https://api.github.com/repos/MarkisJr/Canopy/contents/app.js?ref=main";
+  const UPDATE_RAW_MANIFEST_URL =
+    "https://raw.githubusercontent.com/MarkisJr/Canopy/main/version.json";
+  const UPDATE_RAW_APP_SOURCE_URL =
+    "https://raw.githubusercontent.com/MarkisJr/Canopy/main/app.js";
   const THEME_ORDER = ["power", "fern", "blush"];
   const COLOURS = [
     "#8eadcf",
@@ -103,6 +114,63 @@
     return `${years} years`;
   }
 
+  function normaliseVersion(value) {
+    const match = String(value || "")
+      .trim()
+      .match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/);
+    return match ? `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}` : "";
+  }
+
+  function compareVersions(left, right) {
+    const leftParts = normaliseVersion(left).split(".").map(Number);
+    const rightParts = normaliseVersion(right).split(".").map(Number);
+    if (leftParts.length !== 3 || rightParts.length !== 3) return 0;
+    for (let index = 0; index < 3; index += 1) {
+      if (leftParts[index] > rightParts[index]) return 1;
+      if (leftParts[index] < rightParts[index]) return -1;
+    }
+    return 0;
+  }
+
+  function updatePlatform(userAgent = "", platform = "") {
+    const signature = `${platform} ${userAgent}`;
+    if (/Windows/i.test(signature)) return "windows";
+    if (!/Android|iPhone|iPad|iPod|Mobile/i.test(signature) && /Macintosh|Mac OS|MacIntel/i.test(signature)) {
+      return "macos";
+    }
+    if (!/Android/i.test(signature) && /Linux|X11/i.test(signature)) return "linux";
+    return "other";
+  }
+
+  function updateScriptForPlatform(platform) {
+    if (platform === "windows") {
+      return {
+        label: "Windows",
+        filename: "update-canopy-windows.cmd",
+        action: "Double-click the updater file.",
+      };
+    }
+    if (platform === "macos") {
+      return {
+        label: "macOS",
+        filename: "update-canopy-macos.command",
+        action: "Double-click the updater file. If macOS blocks it, run chmod +x on the file once.",
+      };
+    }
+    if (platform === "linux") {
+      return {
+        label: "Linux",
+        filename: "update-canopy-linux.sh",
+        action: "Open a terminal in the Canopy folder and run ./update-canopy-linux.sh.",
+      };
+    }
+    return {
+      label: "your computer",
+      filename: "the updater for Windows, macOS, or Linux",
+      action: "Choose the updater matching the desktop computer where Canopy is installed.",
+    };
+  }
+
   function initialState() {
     const start = localDate();
     const createdAt = new Date().toISOString();
@@ -143,6 +211,11 @@
         lastSavedAt: null,
         lastExternalBackupAt: null,
         backupWindowStartedAt: createdAt,
+        lastUpdateCheckAt: null,
+        lastUpdateCheckAttemptAt: null,
+        latestKnownVersion: null,
+        updateRemindAfter: null,
+        updateRemindVersion: null,
         activePeriodId: activePeriod.id,
       },
       settings: {
@@ -153,6 +226,7 @@
         theme: "power",
         sidebarCollapsed: false,
         expenseBufferAccountId: "acct_bills",
+        checkForUpdates: true,
       },
       accounts,
       categories,
@@ -283,6 +357,8 @@
   let selectedGoalId = state.goals[0]?.id || null;
   let backupGateActive = false;
   let backupCheckTimer = null;
+  let updateCheckInFlight = false;
+  let updateCheckResult = "";
 
   function activePeriod() {
     return (
@@ -321,6 +397,181 @@
     const start = period?.startDate || "unknown-start";
     const end = period?.endDate || "unknown-end";
     return `canopy-backup_${date}_pay-period_${start}_to_${end}.json`;
+  }
+
+  function validatedUpdateManifest(payload) {
+    let manifest = payload;
+    if (typeof manifest === "string") {
+      try {
+        manifest = JSON.parse(manifest);
+      } catch {
+        manifest = null;
+      }
+    }
+    const version = normaliseVersion(manifest?.version);
+    return version ? { version } : null;
+  }
+
+  function decodeGitHubFilePayload(body) {
+    let payload = body;
+    if (typeof body === "string") {
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        return body;
+      }
+    }
+    if (payload?.content && typeof atob === "function") {
+      try {
+        return atob(String(payload.content).replace(/\s/g, ""));
+      } catch {
+        return "";
+      }
+    }
+    return payload;
+  }
+
+  function versionFromAppSource(source) {
+    const match = String(source || "").match(
+      /\bconst\s+APP_VERSION\s*=\s*["']([^"']+)["']/,
+    );
+    return normaliseVersion(match?.[1]);
+  }
+
+  function versionFromUpdateResponse(body, kind) {
+    const decoded = decodeGitHubFilePayload(body);
+    if (kind === "manifest") return validatedUpdateManifest(decoded)?.version || "";
+    return versionFromAppSource(decoded);
+  }
+
+  async function requestPublishedVersion(requester, signal) {
+    const sources = [
+      { url: UPDATE_MANIFEST_URL, kind: "manifest" },
+      { url: UPDATE_APP_SOURCE_URL, kind: "source" },
+      { url: UPDATE_RAW_MANIFEST_URL, kind: "manifest" },
+      { url: UPDATE_RAW_APP_SOURCE_URL, kind: "source" },
+    ];
+    let lastError = new Error("No published Canopy version could be read");
+
+    for (const source of sources) {
+      if (signal?.aborted) throw lastError;
+      try {
+        const response = await requester(source.url, {
+          cache: "no-store",
+          signal,
+        });
+        if (!response.ok) {
+          lastError = new Error(`GitHub returned ${response.status} for ${source.kind}`);
+          continue;
+        }
+        const version = versionFromUpdateResponse(await response.text(), source.kind);
+        if (version) return { version, source: source.kind };
+        lastError = new Error(`GitHub returned an invalid Canopy ${source.kind}`);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  function updateCheckIsDue(now = Date.now()) {
+    if (state.settings.checkForUpdates === false) return false;
+    const lastSuccess = Date.parse(state.metadata.lastUpdateCheckAt || "");
+    if (Number.isFinite(lastSuccess) && now - lastSuccess < UPDATE_CHECK_INTERVAL_MS) return false;
+    const lastAttempt = Date.parse(state.metadata.lastUpdateCheckAttemptAt || "");
+    return !Number.isFinite(lastAttempt) || now - lastAttempt >= UPDATE_RETRY_INTERVAL_MS;
+  }
+
+  function detectedUpdatePlatform() {
+    if (typeof navigator === "undefined") return "other";
+    return updatePlatform(
+      navigator.userAgent || "",
+      navigator.userAgentData?.platform || navigator.platform || "",
+    );
+  }
+
+  function updateReminderIsDue(version, now = Date.now()) {
+    if (state.metadata.updateRemindVersion !== version) return true;
+    const remindAfter = Date.parse(state.metadata.updateRemindAfter || "");
+    return !Number.isFinite(remindAfter) || now >= remindAfter;
+  }
+
+  function showKnownUpdate(force = false) {
+    const version = normaliseVersion(state.metadata.latestKnownVersion);
+    if (!version || compareVersions(version, APP_VERSION) <= 0) return false;
+    if (!force && !updateReminderIsDue(version)) return false;
+    if (backupGateActive || $$('dialog[open]:not(#update-available-dialog)').length) return false;
+
+    const platform = updateScriptForPlatform(detectedUpdatePlatform());
+    $("#update-version-copy").textContent = `Canopy ${version} is available. You are using ${APP_VERSION}.`;
+    $("#update-platform-pill").textContent = `${platform.label} detected`;
+    $("#update-script-name").textContent = platform.filename;
+    $("#update-script-action").textContent = platform.action;
+    const dialog = $("#update-available-dialog");
+    if (!dialog.open) showDialog(dialog);
+    return true;
+  }
+
+  function dismissUpdateReminder() {
+    const version = normaliseVersion(state.metadata.latestKnownVersion);
+    if (version) {
+      state.metadata.updateRemindVersion = version;
+      state.metadata.updateRemindAfter = new Date(Date.now() + UPDATE_REMINDER_INTERVAL_MS).toISOString();
+      persistState();
+    }
+    const dialog = $("#update-available-dialog");
+    if (dialog?.open) closeDialog(dialog);
+  }
+
+  async function checkForAppUpdate({ force = false, fetchImpl = null } = {}) {
+    if (updateCheckInFlight) return { status: "checking" };
+    if (!force && state.settings.checkForUpdates === false) return { status: "disabled" };
+    showKnownUpdate(force);
+    if (!force && !updateCheckIsDue()) return { status: "cached" };
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      updateCheckResult = "offline";
+      if (force) toast("Canopy is offline, so GitHub could not be checked.", "error");
+      renderUpdateStatus();
+      return { status: "offline" };
+    }
+
+    const requester = fetchImpl || (typeof fetch === "function" ? fetch : null);
+    if (!requester) return { status: "unsupported" };
+    updateCheckInFlight = true;
+    updateCheckResult = "";
+    state.metadata.lastUpdateCheckAttemptAt = new Date().toISOString();
+    persistState();
+    renderUpdateStatus();
+
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), 6000) : null;
+    try {
+      const manifest = await requestPublishedVersion(requester, controller?.signal);
+
+      state.metadata.lastUpdateCheckAt = new Date().toISOString();
+      state.metadata.latestKnownVersion = manifest.version;
+      const hasUpdate = compareVersions(manifest.version, APP_VERSION) > 0;
+      if (!hasUpdate) {
+        state.metadata.updateRemindAfter = null;
+        state.metadata.updateRemindVersion = null;
+      }
+      persistState();
+      updateCheckResult = hasUpdate ? "update" : "current";
+      renderUpdateStatus();
+      if (hasUpdate) showKnownUpdate(true);
+      else if (force) toast(`Canopy ${APP_VERSION} is up to date.`);
+      return { status: hasUpdate ? "update" : "current", version: manifest.version };
+    } catch (error) {
+      updateCheckResult = "error";
+      renderUpdateStatus();
+      if (force) toast("The update check failed. Canopy will keep working normally.", "error");
+      console.info("Canopy update check skipped.", error);
+      return { status: "error" };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      updateCheckInFlight = false;
+      renderUpdateStatus();
+    }
   }
 
   function persistState() {
@@ -3151,7 +3402,49 @@
       }.<br>
       ${overdue ? "Backup required now" : `Next backup due: ${dateTime.format(new Date(dueAt))}`}.<br>
       Suggested filename: <code>${escapeHtml(backupFilename())}</code>.<br>
-      JSON schema v${state.schemaVersion}.`;
+      Canopy v${APP_VERSION} · JSON schema v${state.schemaVersion}.`;
+    renderUpdateStatus();
+  }
+
+  function renderUpdateStatus() {
+    const pill = $("#update-status-pill");
+    if (!pill) return;
+    const enabled = state.settings.checkForUpdates !== false;
+    const latest = normaliseVersion(state.metadata.latestKnownVersion);
+    const hasUpdate = latest && compareVersions(latest, APP_VERSION) > 0;
+    const lastCheck = Date.parse(state.metadata.lastUpdateCheckAt || "");
+    const checkbox = $("#automatic-update-checks");
+    const button = $("#check-for-updates");
+    checkbox.checked = enabled;
+    button.disabled = updateCheckInFlight;
+    button.textContent = updateCheckInFlight ? "Checking…" : "Check now";
+
+    let label = "Not checked";
+    let tone = "";
+    if (!enabled) label = "Checks off";
+    else if (updateCheckInFlight) label = "Checking…";
+    else if (hasUpdate) {
+      label = `v${latest} available`;
+      tone = "warn";
+    } else if (updateCheckResult === "offline") label = "Offline";
+    else if (updateCheckResult === "error") label = "Check unavailable";
+    else if (Number.isFinite(lastCheck)) {
+      label = "Up to date";
+      tone = "good";
+    }
+    pill.textContent = label;
+    pill.className = `pill ${tone}`;
+
+    const checkedText = Number.isFinite(lastCheck)
+      ? `Last successful check: ${new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(lastCheck))}.`
+      : "No successful GitHub check has been recorded yet.";
+    $("#update-status-detail").innerHTML = `
+      <strong>Installed version: ${APP_VERSION}</strong><br>
+      ${escapeHtml(checkedText)}<br>
+      ${enabled ? "Automatic checks run at most once per day." : "Automatic network checks are disabled."}`;
   }
 
   function showDialog(dialog) {
@@ -4127,6 +4420,7 @@
     renderSettings();
     scheduleBackupRequirementCheck();
     toast("External JSON backup download started.");
+    showKnownUpdate();
   }
 
   function switchView(view) {
@@ -4203,6 +4497,11 @@
         openTransactionDialog(editTransaction.dataset.editTransaction);
         return;
       }
+      const dismissUpdate = event.target.closest("[data-dismiss-update]");
+      if (dismissUpdate) {
+        dismissUpdateReminder();
+        return;
+      }
       const goalCard = event.target.closest("[data-select-goal]");
       if (goalCard) {
         selectedGoalId = goalCard.dataset.selectGoal;
@@ -4244,6 +4543,10 @@
         return;
       }
       if (event.key === "Escape") {
+        if ($("#update-available-dialog")?.open) {
+          dismissUpdateReminder();
+          return;
+        }
         $$("dialog[open]:not(#backup-required-dialog)").forEach(closeDialog);
         return;
       }
@@ -4396,6 +4699,20 @@
 
     $("#export-data").addEventListener("click", exportDataBackup);
     $("#required-export-data").addEventListener("click", exportDataBackup);
+    $("#check-for-updates").addEventListener("click", () => {
+      void checkForAppUpdate({ force: true });
+    });
+    $("#automatic-update-checks").addEventListener("change", (event) => {
+      state.settings.checkForUpdates = event.currentTarget.checked;
+      persistState();
+      updateCheckResult = "";
+      renderUpdateStatus();
+      if (event.currentTarget.checked) void checkForAppUpdate({ force: true });
+    });
+    $("#update-available-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      dismissUpdateReminder();
+    });
     $("#backup-required-dialog").addEventListener("cancel", (event) => {
       event.preventDefault();
     });
@@ -4436,6 +4753,7 @@
       if (!document.hidden) {
         checkBackupRequirement();
         scheduleBackupRequirementCheck();
+        void checkForAppUpdate();
       }
     });
     window.addEventListener("beforeunload", (event) => {
@@ -4462,6 +4780,8 @@
     renderAll();
     checkBackupRequirement();
     scheduleBackupRequirementCheck();
+    showKnownUpdate();
+    void checkForAppUpdate();
   }
 
   if (typeof module !== "undefined" && module.exports) {
@@ -4500,6 +4820,13 @@
       daysBetween,
       backupFilename,
       backupIsOverdue,
+      normaliseVersion,
+      compareVersions,
+      updatePlatform,
+      updateScriptForPlatform,
+      validatedUpdateManifest,
+      versionFromAppSource,
+      versionFromUpdateResponse,
       setStateForTest(nextState) {
         state = normalizeState(nextState);
       },

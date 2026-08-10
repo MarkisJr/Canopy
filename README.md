@@ -143,6 +143,9 @@ automatically receives the `origin` remote and upstream branch required by the u
 - `Ctrl+Enter` or `Cmd+Enter`: save an open dialog
 - `Esc`: close a dialog
 - In the quick row: `Tab` moves across fields and `Enter` saves
+- Backup demonstration: press `Ctrl+Alt+Shift+B` on Windows/Linux or
+  `Cmd+Option+Shift+B` on macOS to force the mandatory backup window, even during the safe backup
+  period. This opens the real backup gate, so use **Export data backup** to dismiss it.
 
 ## Data shape
 

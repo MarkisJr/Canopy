@@ -356,6 +356,7 @@
   let currentPlanTab = "expenses";
   let selectedGoalId = state.goals[0]?.id || null;
   let backupGateActive = false;
+  let backupDemoActive = false;
   let backupCheckTimer = null;
   let updateCheckInFlight = false;
   let updateCheckResult = "";
@@ -397,6 +398,15 @@
     const start = period?.startDate || "unknown-start";
     const end = period?.endDate || "unknown-end";
     return `canopy-backup_${date}_pay-period_${start}_to_${end}.json`;
+  }
+
+  function isBackupDemoShortcut(event) {
+    return (
+      (event.ctrlKey || event.metaKey) &&
+      event.altKey &&
+      event.shiftKey &&
+      String(event.key).toLowerCase() === "b"
+    );
   }
 
   function validatedUpdateManifest(payload) {
@@ -4398,7 +4408,7 @@
   function checkBackupRequirement() {
     const dialog = $("#backup-required-dialog");
     if (!dialog) return;
-    backupGateActive = backupIsOverdue();
+    backupGateActive = backupDemoActive || backupIsOverdue();
     $("#backup-required-filename").textContent = backupFilename();
     if (backupGateActive && !dialog.open) {
       showDialog(dialog);
@@ -4415,6 +4425,7 @@
     persistState();
     downloadJson(state, backupFilename());
     backupGateActive = false;
+    backupDemoActive = false;
     const dialog = $("#backup-required-dialog");
     if (dialog?.open) closeDialog(dialog);
     renderSettings();
@@ -4535,6 +4546,12 @@
     });
 
     document.addEventListener("keydown", (event) => {
+      if (isBackupDemoShortcut(event)) {
+        event.preventDefault();
+        backupDemoActive = true;
+        checkBackupRequirement();
+        return;
+      }
       const goalCard = event.target.closest?.("[data-select-goal]");
       if (goalCard && ["Enter", " "].includes(event.key)) {
         event.preventDefault();
@@ -4757,7 +4774,7 @@
       }
     });
     window.addEventListener("beforeunload", (event) => {
-      if (!backupIsOverdue()) return;
+      if (!backupGateActive && !backupIsOverdue()) return;
       event.preventDefault();
       event.returnValue = "";
     });
@@ -4820,6 +4837,7 @@
       daysBetween,
       backupFilename,
       backupIsOverdue,
+      isBackupDemoShortcut,
       normaliseVersion,
       compareVersions,
       updatePlatform,

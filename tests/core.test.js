@@ -1402,6 +1402,39 @@ assert.equal(
   "canopy-backup_2026-07-23_pay-period_2026-07-13_to_2026-07-26.json",
   "backup filenames should include the export date and current pay period",
 );
+assert.equal(
+  core.isBackupDemoShortcut({
+    ctrlKey: true,
+    metaKey: false,
+    altKey: true,
+    shiftKey: true,
+    key: "B",
+  }),
+  true,
+  "the backup demonstration shortcut should work on Windows and Linux",
+);
+assert.equal(
+  core.isBackupDemoShortcut({
+    ctrlKey: false,
+    metaKey: true,
+    altKey: true,
+    shiftKey: true,
+    key: "b",
+  }),
+  true,
+  "the backup demonstration shortcut should work on macOS",
+);
+assert.equal(
+  core.isBackupDemoShortcut({
+    ctrlKey: true,
+    metaKey: false,
+    altKey: false,
+    shiftKey: true,
+    key: "b",
+  }),
+  false,
+  "the shortcut should require the full key combination to avoid accidental activation",
+);
 
 const legacyState = core.initialState();
 legacyState.schemaVersion = 2;

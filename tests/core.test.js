@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const core = require("../app.js");
 
 const state = core.initialState();
-assert.equal(state.metadata.appVersion, "0.7.1");
+assert.equal(state.metadata.appVersion, "0.9.6");
 assert.equal(
   state.settings.checkForUpdates,
   true,
@@ -63,6 +63,24 @@ assert.equal(
   core.updateScriptForPlatform("linux").filename,
   "update-canopy-linux.sh",
 );
+assert.equal(core.startOfCalendarWeek("2026-08-13"), "2026-08-10");
+assert.equal(core.startOfCalendarWeek("2026-08-16"), "2026-08-10");
+const weeklyCalendarItem = {
+  amount: 25,
+  active: true,
+  schedule: { mode: "recurring", anchorDate: "2026-01-05", interval: 2, unit: "weeks" },
+};
+assert.equal(core.scheduleOccurrencesOnDate(weeklyCalendarItem, "2036-01-07").length, 1);
+assert.equal(core.scheduleOccurrencesOnDate(weeklyCalendarItem, "2036-01-14").length, 0);
+const monthEndCalendarItem = {
+  amount: 80,
+  active: true,
+  schedule: { mode: "recurring", anchorDate: "2026-01-31", interval: 1, unit: "months" },
+};
+assert.deepEqual(core.scheduleOccurrencesOnDate(monthEndCalendarItem, "2026-02-28"), [
+  { date: "2026-02-28", amount: 80 },
+]);
+assert.equal(core.scheduleOccurrencesOnDate(monthEndCalendarItem, "2026-02-27").length, 0);
 const period = state.periods[0];
 period.startDate = "2026-03-09";
 period.endDate = "2026-03-22";
@@ -489,7 +507,15 @@ firstArchivedPeriod.archiveSummary = {
 };
 firstArchivedPeriod.archiveOccurrences = {
   income: [],
-  expenses: [{ date: "2026-01-08", amount: 120, itemId: "expense_trip", name: "Trip" }],
+  expenses: [
+    { date: "2026-01-08", amount: 120, itemId: "expense_trip", name: "Trip" },
+    {
+      date: "2026-01-09",
+      amount: 8,
+      itemId: "expense_legacy_parking_estimate",
+      name: "Parking",
+    },
+  ],
 };
 const secondArchivedPeriod = {
   id: "period_archived_second",
@@ -563,8 +589,42 @@ archiveEditState.periods = [firstArchivedPeriod, secondArchivedPeriod, currentAf
 archiveEditState.metadata.activePeriodId = currentAfterArchives.id;
 archiveEditState.transactions = [archivedSplitBefore, secondPeriodIncome, currentExpense];
 archiveEditState.adjustments = [];
+archiveEditState.expenses.push({
+  id: "expense_legacy_parking_estimate",
+  name: "Parking",
+  amount: 8,
+  accountId: "acct_everyday",
+  categoryId: "cat_transport",
+  isEstimate: true,
+  active: true,
+  schedule: { mode: "recurring", anchorDate: "2026-01-09", interval: 1, unit: "weeks" },
+});
 core.setStateForTest(archiveEditState);
 assert.equal(core.accountBalance("acct_everyday", currentAfterArchives), 1050);
+const frozenArchivedProgress = core.plannedOccurrenceProgress(
+  firstArchivedPeriod,
+  "2026-02-01",
+);
+assert.equal(frozenArchivedProgress.length, 2);
+const frozenTripProgress = frozenArchivedProgress.find((entry) => entry.item.name === "Trip");
+const legacyParkingProgress = frozenArchivedProgress.find(
+  (entry) => entry.item.id === "expense_legacy_parking_estimate",
+);
+assert.equal(frozenTripProgress.planned, 120);
+assert.equal(
+  frozenTripProgress.overdue,
+  true,
+  "the calendar should use frozen archived occurrences even after their original plan is gone",
+);
+assert.deepEqual(
+  {
+    estimated: legacyParkingProgress.estimated,
+    status: legacyParkingProgress.status,
+    overdue: legacyParkingProgress.overdue,
+  },
+  { estimated: true, status: "skipped", overdue: false },
+  "a legacy archive occurrence without an estimate flag should inherit it from its matching plan",
+);
 
 const archivedSplitAfter = {
   ...archivedSplitBefore,
@@ -1221,6 +1281,113 @@ assert.equal(
   "a valid expense-buffer account choice should survive state normalisation",
 );
 
+const estimateState = core.initialState();
+const estimatePeriod = estimateState.periods[0];
+estimatePeriod.startDate = "2026-08-03";
+estimatePeriod.endDate = "2026-08-09";
+estimatePeriod.openingBalances.acct_everyday = 500;
+estimateState.expenses = [
+  {
+    id: "estimate_parking",
+    name: "Parking",
+    amount: 8,
+    accountId: "acct_everyday",
+    isEstimate: true,
+    active: true,
+    schedule: { mode: "recurring", anchorDate: "2026-08-03", interval: 1, unit: "weeks" },
+  },
+  {
+    id: "estimate_groceries",
+    name: "Groceries",
+    amount: 140,
+    accountId: "acct_everyday",
+    isEstimate: true,
+    active: true,
+    schedule: { mode: "recurring", anchorDate: "2026-08-03", interval: 1, unit: "weeks" },
+  },
+  {
+    id: "fixed_insurance",
+    name: "Car insurance",
+    amount: 100,
+    accountId: "acct_everyday",
+    isEstimate: false,
+    active: true,
+    schedule: { mode: "recurring", anchorDate: "2026-08-03", interval: 1, unit: "weeks" },
+  },
+];
+estimateState.transactions = [
+  {
+    id: "parking_actual",
+    periodId: estimatePeriod.id,
+    date: "2026-08-04",
+    type: "expense",
+    amount: 5,
+    accountId: "acct_everyday",
+    linkedPlanId: "estimate_parking",
+  },
+];
+core.setStateForTest(estimateState);
+const estimateProgress = core.plannedOccurrenceProgress(estimatePeriod, "2026-08-10");
+const parkingEstimate = estimateProgress.find((entry) => entry.item.id === "estimate_parking");
+const groceryEstimate = estimateProgress.find((entry) => entry.item.id === "estimate_groceries");
+const insuranceObligation = estimateProgress.find((entry) => entry.item.id === "fixed_insurance");
+assert.deepEqual(
+  { status: parkingEstimate.status, tone: parkingEstimate.tone, overdue: parkingEstimate.overdue },
+  { status: "under", tone: "good", overdue: false },
+  "spending below a completed flexible estimate should be positive rather than partial or overdue",
+);
+assert.deepEqual(
+  { status: groceryEstimate.status, tone: groceryEstimate.tone, overdue: groceryEstimate.overdue },
+  { status: "skipped", tone: "good", overdue: false },
+  "an unused flexible estimate should not be considered overdue",
+);
+assert.deepEqual(
+  { status: insuranceObligation.status, tone: insuranceObligation.tone, overdue: insuranceObligation.overdue },
+  { status: "pending", tone: "bad", overdue: true },
+  "an unpaid fixed obligation should remain overdue",
+);
+assert.equal(
+  core.expenseBufferSnapshot("acct_everyday", estimatePeriod, "2026-08-10").remainingExpected,
+  100,
+  "completed estimates should not leave an amount owing in the expense buffer",
+);
+
+const fixedInsurancePayment = {
+  id: "insurance_actual",
+  periodId: estimatePeriod.id,
+  date: "2026-08-03",
+  type: "expense",
+  amount: 100,
+  accountId: "acct_everyday",
+  linkedPlanId: "fixed_insurance",
+};
+estimateState.transactions.push(fixedInsurancePayment);
+core.setStateForTest(estimateState);
+const [parkingCalendarEvent] = core.calendarTransactionEvents(estimateState.transactions[0]);
+const [insuranceCalendarEvent] = core.calendarTransactionEvents(fixedInsurancePayment);
+const parkingCalendarMarkup = core.calendarMovementEventMarkup(parkingCalendarEvent);
+const insuranceCalendarMarkup = core.calendarMovementEventMarkup(insuranceCalendarEvent);
+assert.equal(parkingCalendarEvent.appearance, "flexible-estimate");
+assert.equal(
+  parkingCalendarMarkup.includes("is-flexible-estimate"),
+  true,
+  "actual spending against a flexible estimate should receive the dotted calendar style",
+);
+assert.deepEqual(
+  { appearance: insuranceCalendarEvent.appearance, icon: insuranceCalendarEvent.icon },
+  { appearance: "paid-obligation", icon: "✓" },
+  "a payment against a fixed recurring obligation should use the paid-bill check mark",
+);
+assert.equal(insuranceCalendarMarkup.includes("is-paid-obligation"), true);
+const calendarOverflowMarkup = core.calendarMoreEventsMarkup([
+  { description: "Parking: $5.00" },
+  { description: "Pay: $700.00" },
+]);
+assert.equal(calendarOverflowMarkup.includes("+2 more"), true);
+assert.equal(calendarOverflowMarkup.includes("Hover to view"), true);
+assert.equal(calendarOverflowMarkup.includes('tabindex="0"'), true);
+assert.equal(calendarOverflowMarkup.includes("Parking: $5.00"), true);
+
 const categoryState = core.initialState();
 const categoryPeriod = categoryState.periods[0];
 categoryPeriod.startDate = "2026-07-20";
@@ -1438,18 +1605,32 @@ assert.equal(
 
 const legacyState = core.initialState();
 legacyState.schemaVersion = 2;
+legacyState.expenses = [
+  { id: "legacy_fixed_expense", name: "Legacy bill" },
+  { id: "existing_flexible_expense", name: "Existing estimate", isEstimate: true },
+];
 legacyState.metadata.createdAt = "2026-07-01T00:00:00.000Z";
 delete legacyState.metadata.lastExternalBackupAt;
 delete legacyState.metadata.backupWindowStartedAt;
 legacyState.backups = [{ id: "browser_only_backup" }];
 const migratedState = core.normalizeState(legacyState);
-assert.equal(migratedState.schemaVersion, 4);
+assert.equal(migratedState.schemaVersion, 5);
 assert.equal(
   migratedState.metadata.backupWindowStartedAt,
   legacyState.metadata.createdAt,
   "existing data should use its creation time as the initial backup-window anchor",
 );
 assert.equal(migratedState.metadata.lastExternalBackupAt, null);
+assert.equal(
+  migratedState.expenses.find((expense) => expense.id === "legacy_fixed_expense").isEstimate,
+  false,
+  "expenses from older JSON files should migrate as fixed obligations",
+);
+assert.equal(
+  migratedState.expenses.find((expense) => expense.id === "existing_flexible_expense").isEstimate,
+  true,
+  "an explicitly flexible expense should remain flexible during normalisation",
+);
 assert.equal(
   Object.hasOwn(migratedState, "backups"),
   false,

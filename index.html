@@ -28,6 +28,12 @@
             <span class="nav-icon" aria-hidden="true">⌂</span>
             <span class="nav-label">Overview</span>
           </button>
+          <button class="nav-item" type="button" data-view="calendar" title="Calendar">
+            <span class="nav-icon calendar-nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v13A1.5 1.5 0 0 1 19 20.5H5A1.5 1.5 0 0 1 3.5 19V6A1.5 1.5 0 0 1 5 4.5Z"></path><path d="M7.5 2.8v3.5M16.5 2.8v3.5M3.8 8.5h16.4M7 12h2M11 12h2M15 12h2M7 16h2M11 16h2M15 16h2"></path></svg>
+            </span>
+            <span class="nav-label">Calendar</span>
+          </button>
           <button class="nav-item" type="button" data-view="transactions" title="Transactions">
             <span class="nav-icon" aria-hidden="true">↕</span>
             <span class="nav-label">Transactions</span>
@@ -218,6 +224,47 @@
                 <div class="stack-list" id="recent-transactions"></div>
               </section>
             </div>
+          </section>
+
+          <section class="view calendar-view" id="view-calendar" data-title="Calendar">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Your money in time</span>
+                <h1>Calendar</h1>
+                <p>Scroll continuously through scheduled expenses, income, and account movements.</p>
+              </div>
+            </div>
+
+            <section class="panel calendar-panel" aria-labelledby="calendar-title">
+              <div class="calendar-toolbar">
+                <div>
+                  <span class="eyebrow">Continuous calendar</span>
+                  <h2 id="calendar-title">Money schedule</h2>
+                </div>
+                <strong class="calendar-range" id="calendar-range" aria-live="polite">Loading…</strong>
+                <div class="calendar-toolbar-actions">
+                  <div class="calendar-legend" aria-label="Calendar status colours and event styles">
+                    <span><i class="tone-bad"></i>Overdue / over</span>
+                    <span><i class="tone-warn"></i>Partial</span>
+                    <span><i class="tone-good"></i>Met / under</span>
+                    <span><i class="tone-neutral"></i>Scheduled</span>
+                    <span><i class="event-flexible"></i>Dotted: paid flexible estimate</span>
+                  </div>
+                  <button class="quiet-button" id="calendar-today" type="button">Today</button>
+                </div>
+              </div>
+              <div
+                class="calendar-scroll"
+                id="calendar-scroll"
+                tabindex="0"
+                aria-label="Continuously scrollable financial calendar"
+              >
+                <div class="calendar-weekdays" id="calendar-weekdays" aria-hidden="true">
+                  <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>
+                </div>
+                <div class="calendar-week-list" id="calendar-week-list"></div>
+              </div>
+            </section>
           </section>
 
           <section class="view" id="view-transactions" data-title="Transactions">

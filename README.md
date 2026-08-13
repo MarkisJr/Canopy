@@ -15,7 +15,8 @@ Chrome, Edge, Firefox, Safari, and other modern browsers can use the app and exp
 
 ## What is included
 
-- Dated recurring expenses at arbitrary day, week, month, or year intervals
+- Dated recurring expenses at arbitrary day, week, month, or year intervals, classified as fixed
+  obligations or flexible spending estimates
 - Recurring and irregular income dates, plus an optional primary income source
 - Current pay cycle length and start date
 - Account and category management with a protected, intrinsic Uncategorised fallback
@@ -33,6 +34,8 @@ Chrome, Edge, Firefox, Safari, and other modern browsers can use the app and exp
 - Optional transfer-to-goal links so actual savings deposits increase progress and withdrawals from
   the goal account reduce it
 - Goal pace and period/month comparison charts drawn locally by the browser
+- A continuously scrollable Monday-first calendar for recurring plans, actual income, transfers,
+  archived payment status, and pay-cycle net results
 - Power dark, forest fern, and blush stationery themes
 - Optional once-daily GitHub version checks with a platform-specific updater prompt
 - A required external JSON backup every 48 hours, plus portable JSON import
@@ -40,6 +43,18 @@ Chrome, Edge, Firefox, Safari, and other modern browsers can use the app and exp
 The schedule engine counts an expense only when its due date falls in the active cycle. A monthly
 bill is therefore not divided across fortnights; it appears at its full amount in the fortnight in
 which it is due.
+
+The Calendar tab starts on the current month and scrolls continuously in either direction with
+Monday as the first day of the week. It keeps only a bounded set of week rows in the document and
+recycles them while scrolling, so looking years ahead does not grow the page indefinitely. Past
+cycles use their frozen planned occurrences; hover or focus a cycle-end indicator to compare its
+budgeted and actual net position.
+
+Fixed obligations, such as insurance or subscriptions, remain overdue until their planned amount
+is recorded. Flexible estimates, such as groceries or parking, are budget ceilings: spending below
+them is positive, and an unused past occurrence is not treated as overdue. Future estimates still
+count toward projected cycle expenses, while the calendar places linked actual spending and all
+income on their transaction dates.
 
 Uncategorised is a protected system fallback rather than a user-managed category. Deleting a
 category reassigns its recurring expenses, income sources, transactions, and transaction splits to
@@ -153,7 +168,7 @@ The exported file includes:
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "metadata": {
     "lastExternalBackupAt": "2026-07-23T08:00:00.000Z",
     "backupWindowStartedAt": "2026-07-23T08:00:00.000Z"
@@ -172,6 +187,10 @@ The exported file includes:
 
 Records use stable string IDs and ISO `YYYY-MM-DD` dates. Archived period summaries are frozen so a
 later edit to a recurring plan does not rewrite the historical scorecard.
+
+Recurring expense records use `isEstimate: false` for fixed obligations and `isEstimate: true` for
+flexible spending estimates. Older JSON files without this field migrate to fixed obligations so
+existing overdue behavior is preserved.
 
 A transfer is one transaction with `accountId` as its source and `toAccountId` as its destination.
 `transferNature` records whether it moved into savings, out of savings, or between other accounts.

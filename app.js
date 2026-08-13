@@ -1,8 +1,8 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.7.1";
-  const SCHEMA_VERSION = 4;
+  const APP_VERSION = "0.9.6";
+  const SCHEMA_VERSION = 5;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
   const EXTERNAL_BACKUP_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -17,6 +17,10 @@
     "https://raw.githubusercontent.com/MarkisJr/Canopy/main/version.json";
   const UPDATE_RAW_APP_SOURCE_URL =
     "https://raw.githubusercontent.com/MarkisJr/Canopy/main/app.js";
+  const CALENDAR_INITIAL_WEEKS = 32;
+  const CALENDAR_CURRENT_WEEK_INDEX = 12;
+  const CALENDAR_BATCH_WEEKS = 8;
+  const CALENDAR_MAX_WEEKS = 40;
   const THEME_ORDER = ["power", "fern", "blush"];
   const COLOURS = [
     "#8eadcf",
@@ -84,6 +88,12 @@
 
   function daysBetween(start, end) {
     return Math.round((parseDate(end) - parseDate(start)) / 86400000);
+  }
+
+  function startOfCalendarWeek(value) {
+    const date = parseDate(value);
+    const mondayOffset = (date.getDay() + 6) % 7;
+    return addDays(localDate(date), -mondayOffset);
   }
 
   function formatDate(value, options = {}) {
@@ -292,6 +302,9 @@
       );
     }
     delete next.backups;
+    next.expenses.forEach((expense) => {
+      expense.isEstimate = expense.isEstimate === true;
+    });
     next.transactions.forEach((transaction) => {
       if (typeof transaction.goalId !== "string") transaction.goalId = "";
       if (typeof transaction.toAccountId !== "string") transaction.toAccountId = "";
@@ -360,6 +373,11 @@
   let backupCheckTimer = null;
   let updateCheckInFlight = false;
   let updateCheckResult = "";
+  let calendarWeekStarts = [];
+  let calendarReady = false;
+  let calendarScrollFrame = null;
+  let calendarProgressCache = new Map();
+  let calendarTransactionsByDate = new Map();
 
   function activePeriod() {
     return (
@@ -371,6 +389,26 @@
 
   function periodById(id) {
     return state.periods.find((period) => period.id === id);
+  }
+
+  function calendarPeriodForDate(date) {
+    const stored = state.periods.find(
+      (period) => date >= period.startDate && date <= period.endDate,
+    );
+    if (stored) return stored;
+
+    const anchor = activePeriod();
+    const cycleDays = Math.max(1, daysBetween(anchor.startDate, anchor.endDate) + 1);
+    const cycleIndex = Math.floor(daysBetween(anchor.startDate, date) / cycleDays);
+    const startDate = addDays(anchor.startDate, cycleIndex * cycleDays);
+    return {
+      id: `calendar_cycle_${startDate}`,
+      startDate,
+      endDate: addDays(startDate, cycleDays - 1),
+      status: date > anchor.endDate ? "future" : "historical-gap",
+      openingBalances: {},
+      virtual: true,
+    };
   }
 
   function payIntervalDays() {
@@ -690,6 +728,47 @@
       guard += 1;
     }
     return occurrences;
+  }
+
+  function scheduleOccurrencesOnDate(item, date) {
+    if (item.active === false) return [];
+    const schedule = itemSchedule(item);
+    if (schedule.mode === "irregular") {
+      return schedule.expectedDates
+        .filter((entry) => entry?.date === date)
+        .map((entry) => ({
+          date,
+          amount: Number(entry.amount ?? item.amount) || 0,
+        }));
+    }
+
+    const anchor = schedule.anchorDate;
+    if (!anchor || date < anchor) return [];
+    let matches = false;
+    if (["days", "weeks"].includes(schedule.unit)) {
+      const intervalDays = schedule.interval * (schedule.unit === "weeks" ? 7 : 1);
+      matches = daysBetween(anchor, date) % intervalDays === 0;
+    } else if (schedule.unit === "years") {
+      const anchorDate = parseDate(anchor);
+      const candidateDate = parseDate(date);
+      const yearDifference = candidateDate.getFullYear() - anchorDate.getFullYear();
+      matches =
+        yearDifference >= 0 &&
+        yearDifference % schedule.interval === 0 &&
+        addYears(anchor, yearDifference) === date;
+    } else {
+      const anchorDate = parseDate(anchor);
+      const candidateDate = parseDate(date);
+      const monthDifference =
+        (candidateDate.getFullYear() - anchorDate.getFullYear()) * 12 +
+        candidateDate.getMonth() -
+        anchorDate.getMonth();
+      matches =
+        monthDifference >= 0 &&
+        monthDifference % schedule.interval === 0 &&
+        addMonths(anchor, monthDifference) === date;
+    }
+    return matches ? [{ date, amount: Number(item.amount) || 0 }] : [];
   }
 
   function scheduleText(item) {
@@ -1058,24 +1137,50 @@
     ];
   }
 
-  function plannedOccurrenceProgress(period = activePeriod(), today = localDate()) {
-    const entries = [
-      ...state.expenses.flatMap((item) =>
-        scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
-          ...occurrence,
-          item,
-          type: "expense",
-          actual: 0,
-        })),
-      ),
-      ...state.incomeSources.flatMap((item) =>
-        scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
-          ...occurrence,
-          item,
-          type: "income",
-          actual: 0,
-        })),
-      ),
+  function plannedOccurrenceProgress(period = activePeriod(), today = localDate(), entriesOverride = null) {
+    const archivedEntries = (type, collection) => {
+      const snapshots = period.archiveOccurrences?.[type];
+      if (period.status !== "archived" || !Array.isArray(snapshots)) return null;
+      return snapshots.map((occurrence) => {
+        const currentItem = collection.find((candidate) => candidate.id === occurrence.itemId);
+        const item = {
+          ...(currentItem || {}),
+          id: occurrence.itemId,
+          name:
+            occurrence.name ||
+            currentItem?.name ||
+            (type === "income" ? "Archived income" : "Archived expense"),
+          accountId: occurrence.accountId || currentItem?.accountId || "",
+          categoryId:
+            occurrence.categoryId || currentItem?.categoryId || UNCATEGORISED_CATEGORY_ID,
+          isEstimate: Object.prototype.hasOwnProperty.call(occurrence, "isEstimate")
+            ? occurrence.isEstimate === true
+            : currentItem?.isEstimate === true,
+        };
+        return { ...occurrence, item, type: type === "expenses" ? "expense" : "income", actual: 0 };
+      });
+    };
+    const archivedExpenses = archivedEntries("expenses", state.expenses);
+    const archivedIncome = archivedEntries("income", state.incomeSources);
+    const entries = entriesOverride || [
+      ...(archivedExpenses ||
+        state.expenses.flatMap((item) =>
+          scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
+            ...occurrence,
+            item,
+            type: "expense",
+            actual: 0,
+          })),
+        )),
+      ...(archivedIncome ||
+        state.incomeSources.flatMap((item) =>
+          scheduleOccurrences(item, period.startDate, period.endDate).map((occurrence) => ({
+            ...occurrence,
+            item,
+            type: "income",
+            actual: 0,
+          })),
+        )),
     ];
     const entriesByPlan = new Map();
     entries.forEach((entry) => {
@@ -1124,19 +1229,24 @@
         const planned = roundMoney(entry.amount);
         const actual = Math.max(0, roundMoney(entry.actual));
         const difference = roundMoney(actual - planned);
+        const estimated = entry.type === "expense" && entry.item.isEstimate === true;
         let status = "pending";
         if (actual >= 0.005) {
           if (actual < planned - 0.005) status = "partial";
           else if (Math.abs(difference) < 0.005) status = "exact";
           else status = "over";
         }
-        const overdue = status === "pending" && entry.date < today;
+        if (estimated && entry.date < today) {
+          if (actual < 0.005) status = "skipped";
+          else if (actual < planned - 0.005) status = "under";
+        }
+        const overdue = !estimated && status === "pending" && entry.date < today;
         const tone =
           overdue || (status === "over" && entry.type === "expense")
             ? "bad"
             : status === "partial"
               ? "warn"
-              : ["exact", "over"].includes(status)
+              : ["exact", "over", "under", "skipped"].includes(status)
                 ? "good"
                 : "neutral";
         return {
@@ -1144,6 +1254,7 @@
           planned,
           actual,
           difference,
+          estimated,
           status,
           overdue,
           tone,
@@ -1154,7 +1265,7 @@
         const bGroup = b.status === "pending" ? 0 : 1;
         if (aGroup !== bGroup) return aGroup - bGroup;
         if (aGroup === 1) {
-          const statusOrder = { partial: 0, over: 1, exact: 2 };
+          const statusOrder = { partial: 0, over: 1, under: 2, skipped: 3, exact: 4 };
           const statusDifference = statusOrder[a.status] - statusOrder[b.status];
           if (statusDifference) return statusDifference;
         }
@@ -1167,13 +1278,18 @@
       .filter((entry) => entry.type === "expense" && entry.item.accountId === accountId)
       .map((entry) => ({
         ...entry,
-        remaining: roundMoney(Math.max(0, entry.planned - entry.actual)),
+        remaining:
+          entry.estimated && ["under", "skipped", "exact", "over"].includes(entry.status)
+            ? 0
+            : roundMoney(Math.max(0, entry.planned - entry.actual)),
       }))
       .filter((entry) => entry.remaining >= 0.005);
     const remainingExpected = roundMoney(
       remainingEntries.reduce((sum, entry) => sum + entry.remaining, 0),
     );
-    const overdueEntries = remainingEntries.filter((entry) => entry.date < today);
+    const overdueEntries = remainingEntries.filter(
+      (entry) => entry.date < today && !entry.estimated,
+    );
     const partialEntries = remainingEntries.filter((entry) => entry.status === "partial");
     const currentBalance = accountById(accountId) ? accountBalance(accountId, period) : 0;
     const difference = roundMoney(currentBalance - remainingExpected);
@@ -1608,6 +1724,7 @@
     renderArchive();
     renderSettings();
     if (currentView === "insights") renderInsights();
+    if (currentView === "calendar") initialiseCalendar({ refresh: true });
   }
 
   function applyTheme(theme) {
@@ -2080,10 +2197,16 @@
       const remaining = roundMoney(entry.planned - entry.actual);
       const label = entry.overdue
         ? "Overdue"
+        : entry.status === "skipped"
+          ? "Estimate unused"
+          : entry.status === "under"
+            ? "Under estimate"
         : entry.status === "pending"
           ? entry.type === "income"
             ? "Not received yet"
-            : "Not spent yet"
+            : entry.estimated
+              ? "Estimated spending"
+              : "Not paid yet"
           : entry.status === "partial"
             ? entry.type === "income"
               ? "Underpaid"
@@ -2096,7 +2219,11 @@
                 ? "Overpaid"
                 : "Overspent";
       const detail =
-        entry.status === "pending"
+        entry.status === "skipped"
+          ? `No spending recorded; ${money(entry.planned)} remained unspent`
+          : entry.status === "under"
+            ? `${money(Math.abs(entry.difference))} below the estimate`
+        : entry.status === "pending"
           ? `${money(entry.planned)} planned`
           : entry.status === "partial"
             ? entry.type === "income"
@@ -2162,6 +2289,492 @@
           "Add recurring expenses or income sources to map this cycle.",
           "◫",
         );
+  }
+
+  function resetCalendarDataCache() {
+    calendarProgressCache = new Map();
+    calendarTransactionsByDate = new Map();
+    state.transactions.forEach((transaction) => {
+      const date = String(transaction.date || "");
+      if (!date) return;
+      if (!calendarTransactionsByDate.has(date)) calendarTransactionsByDate.set(date, []);
+      calendarTransactionsByDate.get(date).push(transaction);
+    });
+  }
+
+  function calendarPlannedEntries(period) {
+    if (period.status === "archived" && period.archiveOccurrences) return null;
+    const earliestStoredStart = state.periods
+      .map((item) => item.startDate)
+      .filter(Boolean)
+      .sort()[0];
+    if (period.status === "historical-gap" && period.endDate < earliestStoredStart) return [];
+    const entries = [];
+    for (let date = period.startDate; date <= period.endDate; date = addDays(date, 1)) {
+      state.expenses.forEach((item) => {
+        scheduleOccurrencesOnDate(item, date).forEach((occurrence) => {
+          entries.push({ ...occurrence, item, type: "expense", actual: 0 });
+        });
+      });
+      state.incomeSources.forEach((item) => {
+        scheduleOccurrencesOnDate(item, date).forEach((occurrence) => {
+          entries.push({ ...occurrence, item, type: "income", actual: 0 });
+        });
+      });
+    }
+    return entries;
+  }
+
+  function calendarProgressForPeriod(period) {
+    const key = `${period.id}:${period.archiveRevision || 0}`;
+    if (calendarProgressCache.has(key)) return calendarProgressCache.get(key);
+    const entries = calendarPlannedEntries(period);
+    const progress = plannedOccurrenceProgress(period, localDate(), entries);
+    calendarProgressCache.set(key, progress);
+    return progress;
+  }
+
+  function calendarEntryPresentation(entry) {
+    if (entry.overdue) {
+      return {
+        label: entry.type === "income" ? "Income overdue" : "Overdue",
+        detail: `${money(entry.actual)} of ${money(entry.planned)} recorded`,
+      };
+    }
+    if (entry.status === "pending") {
+      return {
+        label:
+          entry.type === "income"
+            ? "Income expected"
+            : entry.estimated
+              ? "Spending estimate"
+              : "Payment due",
+        detail: `${money(entry.planned)} planned`,
+      };
+    }
+    if (entry.status === "partial") {
+      return {
+        label: entry.type === "income" ? "Underpaid" : "Partially paid",
+        detail: `${money(entry.actual)} of ${money(entry.planned)} recorded`,
+      };
+    }
+    if (entry.status === "exact") {
+      return {
+        label: entry.type === "income" ? "Income received" : "Paid as planned",
+        detail: `${money(entry.actual)} matched the plan`,
+      };
+    }
+    if (entry.status === "under") {
+      return {
+        label: "Under estimate",
+        detail: `${money(entry.actual)} spent; ${money(Math.abs(entry.difference))} below estimate`,
+      };
+    }
+    if (entry.status === "skipped") {
+      return {
+        label: "Estimate unused",
+        detail: `No spending recorded against the ${money(entry.planned)} estimate`,
+      };
+    }
+    return {
+      label: entry.type === "income" ? "Income above plan" : "Overspent",
+      detail: `${money(entry.actual)} against ${money(entry.planned)} planned`,
+    };
+  }
+
+  function calendarPlannedEventMarkup(entry) {
+    const presentation = calendarEntryPresentation(entry);
+    const account = accountById(entry.item.accountId);
+    const title = `${entry.item.name} — ${presentation.label}. ${presentation.detail}${
+      account ? ` from ${account.name}` : ""
+    }.`;
+    return `<div class="calendar-event calendar-planned-event tone-${entry.tone}" title="${escapeHtml(
+      title,
+    )}">
+      <span aria-hidden="true">${entry.type === "income" ? "↓" : "↑"}</span>
+      <strong>${escapeHtml(entry.item.name)}</strong>
+      <em>${
+        entry.status === "pending" && !entry.overdue
+          ? money(entry.planned)
+          : `${money(entry.actual)}/${money(entry.planned)}`
+      }</em>
+    </div>`;
+  }
+
+  function calendarProgressEntryForTransaction(transaction, type, itemId) {
+    if (!itemId) return null;
+    const period = periodById(transaction.periodId) || calendarPeriodForDate(transaction.date);
+    const candidates = calendarProgressForPeriod(period).filter(
+      (entry) => entry.type === type && entry.item.id === itemId,
+    );
+    if (!candidates.length) return null;
+    return candidates.reduce((closest, candidate) =>
+      Math.abs(daysBetween(candidate.date, transaction.date)) <
+      Math.abs(daysBetween(closest.date, transaction.date))
+        ? candidate
+        : closest,
+    );
+  }
+
+  function calendarTransactionEvents(transaction) {
+    if (transaction.type === "income") {
+      const source = incomeById(transaction.linkedPlanId);
+      const progress = calendarProgressEntryForTransaction(
+        transaction,
+        "income",
+        transaction.linkedPlanId,
+      );
+      const unplanned = !source;
+      return [
+        {
+          appearance: "income",
+          tone: progress?.tone === "warn" ? "warn" : "good",
+          icon: "+",
+          label: source?.name || transaction.description || "Unplanned income",
+          amount: Number(transaction.amount) || 0,
+          title: `${unplanned ? "Unplanned income" : source.name} arrived on ${formatDate(
+            transaction.date,
+          )}: ${money(transaction.amount)}${
+            transaction.description ? ` — ${transaction.description}` : ""
+          }.`,
+        },
+      ];
+    }
+    if (transaction.type === "transfer") {
+      const direction = transferDirection(transaction);
+      const source = accountById(transaction.accountId);
+      const destination = accountById(transaction.toAccountId);
+      const tone =
+        direction === "savings-in"
+          ? "good"
+          : direction === "savings-out"
+            ? "bad"
+            : "neutral";
+      const label =
+        direction === "savings-in"
+          ? "Moved to savings"
+          : direction === "savings-out"
+            ? "Withdrawn from savings"
+            : `${source?.name || "Account"} → ${destination?.name || "account"}`;
+      return [
+        {
+          appearance: "transfer",
+          tone,
+          icon: direction === "savings-in" ? "+" : direction === "savings-out" ? "−" : "↔",
+          label,
+          amount: Number(transaction.amount) || 0,
+          title: `${label}: ${money(transaction.amount)} on ${formatDate(transaction.date)}.`,
+        },
+      ];
+    }
+    if (!["expense", "refund"].includes(transaction.type)) return [];
+
+    const grouped = new Map();
+    transactionAllocations(transaction).forEach((allocation) => {
+      if (!allocation.linkedPlanId) return;
+      grouped.set(
+        allocation.linkedPlanId,
+        roundMoney((grouped.get(allocation.linkedPlanId) || 0) + allocation.amount),
+      );
+    });
+    return [...grouped.entries()].map(([itemId, allocated]) => {
+      const item = expenseById(itemId);
+      const progress = calendarProgressEntryForTransaction(transaction, "expense", itemId);
+      const isRefund = allocated < 0 || transaction.type === "refund";
+      const isEstimate = progress ? progress.estimated : item?.isEstimate === true;
+      const amount = Math.abs(allocated);
+      const label = item?.name || progress?.item.name || transaction.description || "Planned expense";
+      return {
+        appearance: isEstimate
+          ? "flexible-estimate"
+          : isRefund
+            ? "fixed-refund"
+            : "paid-obligation",
+        tone: isRefund ? "good" : progress?.tone || "neutral",
+        icon: isRefund ? "+" : isEstimate ? "−" : "✓",
+        label: isRefund ? `${label} refund` : label,
+        amount,
+        title: `${isRefund ? "Refunded" : "Paid"} ${money(amount)} for ${label} on ${formatDate(
+          transaction.date,
+        )}${progress ? `. ${calendarEntryPresentation(progress).label}` : ""}.`,
+      };
+    });
+  }
+
+  function calendarMovementEventMarkup(event) {
+    const appearance = [
+      "income",
+      "transfer",
+      "flexible-estimate",
+      "fixed-refund",
+      "paid-obligation",
+    ].includes(event.appearance)
+      ? event.appearance
+      : "movement";
+    return `<div class="calendar-event calendar-movement-event is-${appearance} tone-${event.tone}" title="${escapeHtml(
+      event.title,
+    )}">
+      <span aria-hidden="true">${event.icon}</span>
+      <strong>${escapeHtml(event.label)}</strong>
+      <em>${money(event.amount)}</em>
+    </div>`;
+  }
+
+  function calendarNetIndicatorMarkup(period, date) {
+    if (period.virtual || period.status !== "archived" || date !== period.endDate) return "";
+    const summary = summaryForPeriod(period);
+    const tone = varianceStatus(summary.netDifference, summary.budgetNet);
+    const direction =
+      tone === "good" ? "ahead of plan" : tone === "bad" ? "behind plan" : "close to plan";
+    const label = `Cycle ended ${direction}. Budgeted net ${money(
+      summary.budgetNet,
+    )}; actual net ${money(summary.actualNet)}; difference ${money(summary.netDifference, {
+      sign: true,
+    })}.`;
+    return `<button class="calendar-net-indicator tone-${tone}" type="button" aria-label="${escapeHtml(
+      label,
+    )}">
+      <span aria-hidden="true">${tone === "good" ? "+" : tone === "bad" ? "−" : "="}</span>
+      <span class="calendar-net-tooltip" role="tooltip">
+        <strong>Cycle ${escapeHtml(direction)}</strong>
+        <span>Budgeted net <b>${money(summary.budgetNet)}</b></span>
+        <span>Actual net <b>${money(summary.actualNet)}</b></span>
+        <span>Difference <b>${money(summary.netDifference, { sign: true })}</b></span>
+      </span>
+    </button>`;
+  }
+
+  function calendarCycleMarkerMarkup(period, date) {
+    if (date !== period.startDate) return "";
+    if (period.startDate <= activePeriod().endDate) {
+      return '<span class="calendar-cycle-kicker">Cycle</span>';
+    }
+    const plannedExpenses = roundMoney(
+      calendarProgressForPeriod(period)
+        .filter((entry) => entry.type === "expense")
+        .reduce((total, entry) => total + entry.planned, 0),
+    );
+    return `<span class="calendar-cycle-budget" title="${escapeHtml(
+      `${money(plannedExpenses)} of expenses budgeted for ${formatDate(
+        period.startDate,
+      )} to ${formatDate(period.endDate)}.`,
+    )}"><strong>${money(plannedExpenses, { cents: false })}</strong><small>planned</small></span>`;
+  }
+
+  function calendarMoreEventsMarkup(hiddenEvents) {
+    if (!hiddenEvents.length) return "";
+    const descriptions = hiddenEvents.map((event) => event.description);
+    const details = descriptions.join("; ");
+    const countLabel = `+${hiddenEvents.length} more`;
+    return `<span class="calendar-more-events" tabindex="0" aria-label="${escapeHtml(
+      `${hiddenEvents.length} more item${hiddenEvents.length === 1 ? "" : "s"} on this day. ${details}`,
+    )}" title="${escapeHtml(details)}">
+      <strong>${countLabel}</strong>
+      <small>Hover to view</small>
+      <span class="calendar-more-tooltip" role="tooltip">
+        <b>More on this day</b>
+        ${descriptions.map((description) => `<span>${escapeHtml(description)}</span>`).join("")}
+      </span>
+    </span>`;
+  }
+
+  function calendarDayMarkup(date) {
+    const today = localDate();
+    const period = calendarPeriodForDate(date);
+    const cycleLength = Math.max(1, daysBetween(period.startDate, period.endDate) + 1);
+    const cycleOffset = Math.round(
+      daysBetween(activePeriod().startDate, period.startDate) / cycleLength,
+    );
+    const planned = calendarProgressForPeriod(period).filter((entry) => entry.date === date);
+    const visiblePlanned = planned.filter((entry) => {
+      if (entry.type === "income") return entry.actual < 0.005;
+      if (entry.estimated) return entry.status === "pending" && entry.date >= today;
+      return !["exact", "over"].includes(entry.status);
+    });
+    const movements = (calendarTransactionsByDate.get(date) || []).flatMap(
+      calendarTransactionEvents,
+    );
+    const eventMarkup = [
+      ...movements.map((event) => ({
+        markup: calendarMovementEventMarkup(event),
+        description: `${event.label}: ${money(event.amount)}`,
+      })),
+      ...visiblePlanned.map((entry) => ({
+        markup: calendarPlannedEventMarkup(entry),
+        description: `${entry.item.name}: ${calendarEntryPresentation(entry).label}`,
+      })),
+    ];
+    const visible = eventMarkup.slice(0, 3);
+    const hidden = eventMarkup.slice(3);
+    const dateObject = parseDate(date);
+    const isMonthStart = dateObject.getDate() === 1;
+    const classes = [
+      "calendar-day",
+      date === today ? "is-today" : "",
+      date < today ? "is-past" : "",
+      [5, 6].includes((dateObject.getDay() + 6) % 7) ? "is-weekend" : "",
+      Math.abs(cycleOffset) % 2 === 1 ? "is-cycle-shaded" : "",
+      date === period.startDate ? "is-cycle-start" : "",
+      date === period.endDate ? "is-cycle-end" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const fullDate = new Intl.DateTimeFormat(undefined, {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    }).format(dateObject);
+    return `<div class="${classes}" data-date="${date}" aria-label="${escapeHtml(fullDate)}">
+      <div class="calendar-day-heading">
+        <span class="calendar-date-number">${dateObject.getDate()}</span>
+        ${
+          isMonthStart
+            ? `<strong class="calendar-month-kicker">${new Intl.DateTimeFormat(undefined, {
+                month: "short",
+              }).format(dateObject)}</strong>`
+            : ""
+        }
+        ${calendarCycleMarkerMarkup(period, date)}
+        ${calendarNetIndicatorMarkup(period, date)}
+      </div>
+      <div class="calendar-day-events">
+        ${visible.map((event) => event.markup).join("")}
+        ${calendarMoreEventsMarkup(hidden)}
+      </div>
+    </div>`;
+  }
+
+  function calendarWeekMarkup(weekStart) {
+    return `<div class="calendar-week" data-week-start="${weekStart}">
+      ${Array.from({ length: 7 }, (_, index) => calendarDayMarkup(addDays(weekStart, index))).join("")}
+    </div>`;
+  }
+
+  function calendarRowHeight() {
+    return $("#calendar-week-list .calendar-week")?.getBoundingClientRect().height || 124;
+  }
+
+  function updateCalendarVisibleRange() {
+    const scroll = $("#calendar-scroll");
+    const rows = $$("#calendar-week-list .calendar-week");
+    const label = $("#calendar-range");
+    if (!scroll || !rows.length || !label) return;
+    const scrollBounds = scroll.getBoundingClientRect();
+    const headerHeight = $("#calendar-weekdays")?.offsetHeight || 0;
+    const visible = rows.filter((row) => {
+      const bounds = row.getBoundingClientRect();
+      return bounds.bottom > scrollBounds.top + headerHeight && bounds.top < scrollBounds.bottom;
+    });
+    const first = visible[0] || rows[0];
+    const last = visible.at(-1) || rows.at(-1);
+    const start = first.dataset.weekStart;
+    const end = addDays(last.dataset.weekStart, 6);
+    const startDate = parseDate(start);
+    const endDate = parseDate(end);
+    const sameYear = startDate.getFullYear() === endDate.getFullYear();
+    const firstLabel = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+      year: sameYear ? undefined : "numeric",
+    }).format(startDate);
+    const lastLabel = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    }).format(endDate);
+    label.textContent = `${firstLabel} – ${lastLabel}`;
+  }
+
+  function renderCalendarRows({ preserveScroll = true } = {}) {
+    const list = $("#calendar-week-list");
+    const scroll = $("#calendar-scroll");
+    if (!list || !scroll) return;
+    const previousTop = scroll.scrollTop;
+    resetCalendarDataCache();
+    list.innerHTML = calendarWeekStarts.map(calendarWeekMarkup).join("");
+    if (preserveScroll) scroll.scrollTop = previousTop;
+    updateCalendarVisibleRange();
+  }
+
+  function initialiseCalendar({ force = false, refresh = false } = {}) {
+    const scroll = $("#calendar-scroll");
+    if (!scroll) return;
+    if (calendarReady && !force) {
+      if (refresh) renderCalendarRows();
+      else updateCalendarVisibleRange();
+      return;
+    }
+    const currentWeek = startOfCalendarWeek(localDate());
+    const firstWeek = addDays(currentWeek, -CALENDAR_CURRENT_WEEK_INDEX * 7);
+    calendarWeekStarts = Array.from({ length: CALENDAR_INITIAL_WEEKS }, (_, index) =>
+      addDays(firstWeek, index * 7),
+    );
+    calendarReady = true;
+    renderCalendarRows({ preserveScroll: false });
+    requestAnimationFrame(() => {
+      scroll.scrollTop =
+        (CALENDAR_CURRENT_WEEK_INDEX - 1) * calendarRowHeight();
+      updateCalendarVisibleRange();
+    });
+  }
+
+  function extendCalendar(direction) {
+    const scroll = $("#calendar-scroll");
+    const list = $("#calendar-week-list");
+    if (!scroll || !list || !calendarWeekStarts.length) return;
+    if (direction === "up") {
+      const anchor = $("#calendar-week-list .calendar-week");
+      const anchorTop = anchor?.getBoundingClientRect().top || 0;
+      const first = calendarWeekStarts[0];
+      const added = Array.from({ length: CALENDAR_BATCH_WEEKS }, (_, index) =>
+        addDays(first, -(CALENDAR_BATCH_WEEKS - index) * 7),
+      );
+      calendarWeekStarts.unshift(...added);
+      list.insertAdjacentHTML("afterbegin", added.map(calendarWeekMarkup).join(""));
+      if (calendarWeekStarts.length > CALENDAR_MAX_WEEKS) {
+        calendarWeekStarts.splice(-CALENDAR_BATCH_WEEKS);
+        $$("#calendar-week-list .calendar-week")
+          .slice(-CALENDAR_BATCH_WEEKS)
+          .forEach((row) => row.remove());
+      }
+      if (anchor) scroll.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+      return;
+    }
+
+    const last = calendarWeekStarts.at(-1);
+    const added = Array.from({ length: CALENDAR_BATCH_WEEKS }, (_, index) =>
+      addDays(last, (index + 1) * 7),
+    );
+    calendarWeekStarts.push(...added);
+    list.insertAdjacentHTML("beforeend", added.map(calendarWeekMarkup).join(""));
+    if (calendarWeekStarts.length > CALENDAR_MAX_WEEKS) {
+      const retainedAnchor = $$("#calendar-week-list .calendar-week")[CALENDAR_BATCH_WEEKS];
+      const anchorTop = retainedAnchor?.getBoundingClientRect().top || 0;
+      calendarWeekStarts.splice(0, CALENDAR_BATCH_WEEKS);
+      $$("#calendar-week-list .calendar-week")
+        .slice(0, CALENDAR_BATCH_WEEKS)
+        .forEach((row) => row.remove());
+      if (retainedAnchor) {
+        scroll.scrollTop += retainedAnchor.getBoundingClientRect().top - anchorTop;
+      }
+    }
+  }
+
+  function handleCalendarScroll() {
+    if (calendarScrollFrame) return;
+    calendarScrollFrame = requestAnimationFrame(() => {
+      calendarScrollFrame = null;
+      const scroll = $("#calendar-scroll");
+      if (!scroll) return;
+      const rowHeight = calendarRowHeight();
+      const threshold = rowHeight * 4;
+      if (scroll.scrollTop < threshold) extendCalendar("up");
+      else if (scroll.scrollTop + scroll.clientHeight > scroll.scrollHeight - threshold) {
+        extendCalendar("down");
+      }
+      updateCalendarVisibleRange();
+    });
   }
 
   function renderDashboardAccounts(period) {
@@ -2592,11 +3205,15 @@
                   <span>${escapeHtml(scheduleText(expense))}</span>
                   <span>·</span>
                   <span>Next from ${formatCompactDate(itemSchedule(expense).anchorDate)}</span>
+                  <span>·</span>
+                  <span>${expense.isEstimate ? "Flexible estimate" : "Fixed obligation"}</span>
                 </div>
                 <div class="entity-card-footer">
                   <span>${escapeHtml(account?.name || "No default account")}</span>
-                  <span class="pill ${inCycle > 0 ? "bad" : ""}">${
-                    inCycle > 0 ? `${money(inCycle)} this cycle` : "Not due this cycle"
+                  <span class="pill ${inCycle > 0 ? (expense.isEstimate ? "warn" : "bad") : ""}">${
+                    inCycle > 0
+                      ? `${money(inCycle)} ${expense.isEstimate ? "estimated" : "due"} this cycle`
+                      : "Not due this cycle"
                   }</span>
                 </div>
               </article>`;
@@ -3857,6 +4474,13 @@
           <label><span>Keywords</span><input name="keywords" type="text" value="${escapeHtml(
             (item?.keywords || []).join(", "),
           )}" placeholder="gym, membership" /></label>
+          <label class="checkbox-label checkbox-explainer full-width">
+            <input name="isEstimate" type="checkbox" ${item?.isEstimate === true ? "checked" : ""} />
+            <span>
+              <strong>Flexible spending estimate</strong>
+              <small>Use for parking, groceries, and similar targets. Spending less is positive, and an unused occurrence is not overdue.</small>
+            </span>
+          </label>
           ${recurrenceFields(item || {})}
           <label class="checkbox-label full-width"><input name="active" type="checkbox" ${
             item?.active === false ? "" : "checked"
@@ -4082,6 +4706,7 @@
           .map((keyword) => keyword.trim())
           .filter(Boolean),
         schedule,
+        isEstimate: type === "expense" && data.get("isEstimate") === "on",
         active: data.get("active") === "on",
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -4339,6 +4964,8 @@
             ...occurrence,
             itemId: item.id,
             name: item.name,
+            accountId: item.accountId || "",
+            categoryId: item.categoryId || UNCATEGORISED_CATEGORY_ID,
           })),
         ),
         expenses: state.expenses.flatMap((item) =>
@@ -4346,6 +4973,9 @@
             ...occurrence,
             itemId: item.id,
             name: item.name,
+            accountId: item.accountId || "",
+            categoryId: item.categoryId || UNCATEGORISED_CATEGORY_ID,
+            isEstimate: item.isEstimate === true,
           })),
         ),
       };
@@ -4445,6 +5075,7 @@
     $("#mobile-menu").setAttribute("aria-expanded", "false");
     if (view === "insights") renderInsights();
     if (view === "goals") requestAnimationFrame(renderGoalDetail);
+    if (view === "calendar") requestAnimationFrame(() => initialiseCalendar());
     $("#main-content").focus({ preventScroll: true });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -4597,6 +5228,11 @@
       state.settings.sidebarCollapsed = state.settings.sidebarCollapsed !== true;
       persistState();
       applySidebarState();
+    });
+
+    $("#calendar-scroll").addEventListener("scroll", handleCalendarScroll, { passive: true });
+    $("#calendar-today").addEventListener("click", () => {
+      initialiseCalendar({ force: true });
     });
 
     $("#global-add-transaction").addEventListener("click", () => openTransactionDialog());
@@ -4784,6 +5420,7 @@
       window.__canopyResizeTimer = setTimeout(() => {
         if (currentView === "insights") renderInsights();
         if (currentView === "goals") renderGoalDetail();
+        if (currentView === "calendar") updateCalendarVisibleRange();
       }, 150);
     });
   }
@@ -4806,6 +5443,7 @@
       initialState,
       normalizeState,
       scheduleOccurrences,
+      scheduleOccurrencesOnDate,
       scheduleText,
       summaryForPeriod,
       refreshArchivedPeriodAfterTransactionChange,
@@ -4830,11 +5468,15 @@
       reassignCategoryReferences,
       plannedOccurrenceProgress,
       expenseBufferSnapshot,
+      calendarTransactionEvents,
+      calendarMovementEventMarkup,
+      calendarMoreEventsMarkup,
       matchingPlan,
       addDays,
       addMonths,
       addYears,
       daysBetween,
+      startOfCalendarWeek,
       backupFilename,
       backupIsOverdue,
       isBackupDemoShortcut,
@@ -4847,6 +5489,7 @@
       versionFromUpdateResponse,
       setStateForTest(nextState) {
         state = normalizeState(nextState);
+        resetCalendarDataCache();
       },
       getStateForTest() {
         return state;

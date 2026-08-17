@@ -1,8 +1,8 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.9.6";
-  const SCHEMA_VERSION = 5;
+  const APP_VERSION = "0.9.7";
+  const SCHEMA_VERSION = 6;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
   const EXTERNAL_BACKUP_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -852,10 +852,14 @@
   }
 
   function inferGoalTransferEffect(transaction) {
-    if (transaction?.type !== "transfer" || !transaction.goalId) return 0;
+    if (!transaction?.goalId || !["transfer", "income"].includes(transaction.type)) return 0;
     const goal = goalById(transaction.goalId);
     if (!goal) return 0;
     const amount = Number(transaction.amount) || 0;
+    if (transaction.type === "income") {
+      if (goal.accountId) return transaction.accountId === goal.accountId ? amount : 0;
+      return accountById(transaction.accountId)?.kind === "savings" ? amount : 0;
+    }
     if (goal.accountId) {
       if (transaction.toAccountId === goal.accountId) return amount;
       if (transaction.accountId === goal.accountId) return -amount;
@@ -868,7 +872,7 @@
   }
 
   function goalTransferEffect(transaction) {
-    if (transaction?.type !== "transfer" || !transaction.goalId) return 0;
+    if (!transaction?.goalId || !["transfer", "income"].includes(transaction.type)) return 0;
     const storedEffect = Number(transaction.goalContribution);
     return Number.isFinite(storedEffect) ? storedEffect : inferGoalTransferEffect(transaction);
   }
@@ -885,7 +889,7 @@
   }
 
   function goalImpactEntries(transaction) {
-    if (transaction?.type !== "transfer") return [];
+    if (!["transfer", "income"].includes(transaction?.type)) return [];
     if (transaction.goalId) {
       const amount = goalTransferEffect(transaction);
       return Math.abs(amount) >= 0.005
@@ -979,6 +983,13 @@
   }
 
   function transactionMutationMessage(action, transaction) {
+    if (transaction?.type === "income" && transaction.goalId) {
+      const amount = goalTransferEffect(transaction);
+      const goal = goalById(transaction.goalId);
+      if (amount >= 0.005) {
+        return `${action} ${money(amount)} was added to ${goal?.name || "the selected savings goal"}.`;
+      }
+    }
     const impacts = normaliseGoalImpacts(transaction?.goalImpacts);
     if (!impacts.length) return action;
     const total = Math.abs(
@@ -1015,10 +1026,22 @@
     });
   }
 
-  function validateGoalTransfer(transaction) {
-    if (transaction.type !== "transfer" || !transaction.goalId) return "";
+  function validateGoalAssignment(transaction) {
+    if (!transaction.goalId) return "";
     const goal = goalById(transaction.goalId);
     if (!goal) return "Choose an existing savings goal.";
+    if (transaction.type === "income") {
+      if (goal.accountId && transaction.accountId !== goal.accountId) {
+        return `Income linked to “${goal.name}” must be deposited into its associated account.`;
+      }
+      if (!goal.accountId && accountById(transaction.accountId)?.kind !== "savings") {
+        return `Income linked to “${goal.name}” must be deposited into a savings account.`;
+      }
+      return "";
+    }
+    if (transaction.type !== "transfer") {
+      return "Savings goals can only be linked to income or transfers.";
+    }
     if (goal.accountId) {
       if (![transaction.accountId, transaction.toAccountId].includes(goal.accountId)) {
         return `A transfer linked to “${goal.name}” must move into or out of its associated account.`;
@@ -2962,17 +2985,20 @@
 
   function syncQuickTransactionTypeFields() {
     const form = $("#quick-transaction-form");
-    const isTransfer = form.elements.type.value === "transfer";
+    const type = form.elements.type.value;
+    const isTransfer = type === "transfer";
+    const canLinkGoal = ["transfer", "income"].includes(type);
     form.classList.toggle("is-transfer", isTransfer);
     $$(".quick-transfer-only", form).forEach((element) => (element.hidden = !isTransfer));
+    $$(".quick-goal-link", form).forEach((element) => (element.hidden = !canLinkGoal));
     $$(".quick-non-transfer", form).forEach((element) => (element.hidden = isTransfer));
     form.elements.toAccountId.required = isTransfer;
     $("#quick-account-label").textContent = isTransfer ? "From account" : "Account";
     if (!isTransfer) {
       form.elements.toAccountId.value = "";
-      form.elements.goalId.value = "";
       renderQuickCategoryOptions();
     }
+    if (!canLinkGoal) form.elements.goalId.value = "";
     $("#quick-suggestion").textContent = isTransfer
       ? "Transfers affect both account balances but not income or expenses."
       : "";
@@ -3341,7 +3367,7 @@
     return state.transactions
       .filter(
         (transaction) =>
-          transaction.type === "transfer" &&
+          ["transfer", "income"].includes(transaction.type) &&
           Math.abs(transactionGoalEffect(transaction, goal.id)) >= 0.005 &&
           (!period || transaction.periodId === period.id),
       )
@@ -3479,8 +3505,9 @@
           )} this cycle</strong>
         </div>
         <p>
-          The planned amount above is your target pace. Linked transfers and automatic shares of
-          unlinked withdrawals form the actual progress line; neither is treated as an expense.
+          The planned amount above is your target pace. Linked transfers, direct income deposits,
+          and automatic shares of unlinked withdrawals form the actual progress line. Transfers
+          are not treated as income or spending; direct deposits retain their normal income status.
         </p>
         <div class="goal-transfer-list">
           ${
@@ -3489,14 +3516,19 @@
                   .map((transaction) => {
                     const effect = transactionGoalEffect(transaction, goal.id);
                     const automatic = !transaction.goalId;
+                    const directIncome = transaction.type === "income";
                     const otherAccount =
-                      effect >= 0
-                        ? accountById(transaction.accountId)
-                        : accountById(transaction.toAccountId);
+                      directIncome
+                        ? null
+                        : effect >= 0
+                          ? accountById(transaction.accountId)
+                          : accountById(transaction.toAccountId);
                     return `<div>
                       <span>${formatCompactDate(transaction.date)} · ${escapeHtml(
-                        otherAccount?.name || transaction.description,
-                      )}${automatic ? " · Automatic share" : ""}</span>
+                        directIncome
+                          ? transaction.description || "Direct income"
+                          : otherAccount?.name || transaction.description,
+                      )}${directIncome ? " · Direct income" : automatic ? " · Automatic share" : ""}</span>
                       <strong class="${effect >= 0 ? "status-good" : "status-bad"}">${money(effect, {
                         sign: true,
                       })}</strong>
@@ -4126,7 +4158,7 @@
     archiveNotice.innerHTML = isArchivedEdit
       ? `<strong>${formatDate(transactionPeriod.startDate)} – ${formatDate(
           transactionPeriod.endDate,
-        )}</strong><span>Saving recalculates this archived cycle and carries the account difference forward to current balances. Current-cycle income and spending remain separate. For split transactions, changing a line updates the total automatically.</span>`
+        )}</strong><span>Saving recalculates this archived cycle and carries account and savings-goal changes forward. Current-cycle income and spending remain separate. For split transactions, changing a line updates the total automatically.</span>`
       : "";
     $("#save-transaction").textContent = isArchivedEdit
       ? "Save archive correction"
@@ -4146,7 +4178,9 @@
     const form = $("#transaction-form");
     const type = form.elements.type.value;
     const isTransfer = type === "transfer";
+    const canLinkGoal = ["transfer", "income"].includes(type);
     $$(".transfer-only", form).forEach((element) => (element.hidden = !isTransfer));
+    $$(".goal-link-field", form).forEach((element) => (element.hidden = !canLinkGoal));
     $$(".non-transfer", form).forEach((element) => (element.hidden = isTransfer));
     form.elements.toAccountId.required = isTransfer;
     form.elements.isSplit.disabled = isTransfer || type === "income";
@@ -4154,8 +4188,12 @@
     if (form.elements.isSplit.disabled) form.elements.isSplit.checked = false;
     if (!isTransfer) {
       form.elements.toAccountId.value = "";
-      form.elements.goalId.value = "";
     }
+    if (!canLinkGoal) form.elements.goalId.value = "";
+    $("#transaction-goal-help").textContent =
+      type === "income"
+        ? "Optional. Use this when income such as interest is deposited directly into the goal’s savings account."
+        : "Optional. A selected goal receives the full transfer. Unlinked withdrawals are shared across goals using the source savings account.";
     $("#split-editor").hidden = !form.elements.isSplit.checked;
     renderTransactionPlanOptions(form.elements.linkedPlanId.value);
     $("#transaction-suggestion").textContent = isTransfer
@@ -4183,7 +4221,9 @@
   function applySelectedGoalAccount(form) {
     const goal = goalById(form.elements.goalId.value);
     if (!goal?.accountId) return;
-    if (form.elements.accountId.value !== goal.accountId) {
+    if (form.elements.type.value === "income") {
+      form.elements.accountId.value = goal.accountId;
+    } else if (form.elements.accountId.value !== goal.accountId) {
       form.elements.toAccountId.value = goal.accountId;
     }
   }
@@ -4296,7 +4336,7 @@
       amount,
       accountId: String(data.get("accountId") || ""),
       toAccountId: type === "transfer" ? String(data.get("toAccountId") || "") : "",
-      goalId: type === "transfer" ? String(data.get("goalId") || "") : "",
+      goalId: ["transfer", "income"].includes(type) ? String(data.get("goalId") || "") : "",
       categoryId: type === "transfer" ? "" : String(data.get("categoryId") || ""),
       linkedPlanId: type === "transfer" ? "" : String(data.get("linkedPlanId") || ""),
       reference: String(data.get("reference") || "").trim(),
@@ -4309,15 +4349,15 @@
       toast("Choose both the source and destination accounts.", "error");
       return false;
     }
-    const goalTransferError = validateGoalTransfer(transaction);
-    if (goalTransferError) {
-      toast(goalTransferError, "error");
+    const goalAssignmentError = validateGoalAssignment(transaction);
+    if (goalAssignmentError) {
+      toast(goalAssignmentError, "error");
       return false;
     }
     transaction.transferNature = type === "transfer" ? inferTransferDirection(transaction) : "";
     const previousTransaction = existing ? clone(existing) : null;
     transaction.goalContribution =
-      type === "transfer" && transaction.goalId
+      transaction.goalId
         ? roundMoney(inferGoalTransferEffect(transaction))
         : 0;
     transaction.goalImpacts = automaticGoalImpacts(transaction, previousTransaction);
@@ -4355,7 +4395,7 @@
       amount: roundMoney(data.get("amount")),
       accountId: String(data.get("accountId") || ""),
       toAccountId: type === "transfer" ? String(data.get("toAccountId") || "") : "",
-      goalId: type === "transfer" ? String(data.get("goalId") || "") : "",
+      goalId: ["transfer", "income"].includes(type) ? String(data.get("goalId") || "") : "",
       categoryId: type === "transfer" ? "" : String(data.get("categoryId") || ""),
       linkedPlanId:
         type === "transfer"
@@ -4378,14 +4418,14 @@
       toast("Choose two different accounts for the transfer.", "error");
       return;
     }
-    const goalTransferError = validateGoalTransfer(transaction);
-    if (goalTransferError) {
-      toast(goalTransferError, "error");
+    const goalAssignmentError = validateGoalAssignment(transaction);
+    if (goalAssignmentError) {
+      toast(goalAssignmentError, "error");
       return;
     }
     transaction.transferNature = type === "transfer" ? inferTransferDirection(transaction) : "";
     transaction.goalContribution =
-      type === "transfer" && transaction.goalId
+      transaction.goalId
         ? roundMoney(inferGoalTransferEffect(transaction))
         : 0;
     transaction.goalImpacts = automaticGoalImpacts(transaction);
@@ -5155,7 +5195,7 @@
         const goal = goalById(progressButton.dataset.addGoalProgress);
         if (!goal) return;
         const answer = window.prompt(
-          `What is the reconciled amount saved toward “${goal.name}” now? Linked transfers and automatic withdrawal shares are already included.`,
+          `What is the reconciled amount saved toward “${goal.name}” now? Linked transfers, direct income deposits, and automatic withdrawal shares are already included.`,
           Number(goal.currentAmount || 0).toFixed(2),
         );
         if (answer === null) return;
@@ -5456,6 +5496,7 @@
       transferStats,
       goalTransferEffect,
       transactionGoalEffect,
+      validateGoalAssignment,
       automaticGoalImpacts,
       applyGoalTransferChange,
       goalTransferNet,

@@ -328,7 +328,7 @@
                     <span>To account</span>
                     <select name="toAccountId"></select>
                   </label>
-                  <label class="quick-transfer-only" hidden>
+                  <label class="quick-goal-link" hidden>
                     <span>Savings goal</span>
                     <select name="goalId"></select>
                   </label>
@@ -770,10 +770,10 @@
             <span>To account</span>
             <select name="toAccountId"></select>
           </label>
-          <label class="transfer-only" hidden>
+          <label class="goal-link-field" hidden>
             <span>Savings goal</span>
             <select name="goalId"></select>
-            <small>
+            <small id="transaction-goal-help">
               Optional. A selected goal receives the full transfer. Unlinked withdrawals are shared
               across goals using the source savings account.
             </small>

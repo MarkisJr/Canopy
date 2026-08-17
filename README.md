@@ -31,8 +31,8 @@ Chrome, Edge, Firefox, Safari, and other modern browsers can use the app and exp
 - Cycle archiving with balances, transactions, totals, and discrepancies retained; archived
   transactions can be corrected later with their account changes carried into current balances
 - Savings goals planned either by finish date or contribution per pay cycle
-- Optional transfer-to-goal links so actual savings deposits increase progress and withdrawals from
-  the goal account reduce it
+- Optional transfer-to-goal and direct-income-to-goal links, so savings deposits and interest can
+  increase progress while withdrawals from the goal account reduce it
 - Goal pace and period/month comparison charts drawn locally by the browser
 - A continuously scrollable Monday-first calendar for recurring plans, actual income, transfers,
   archived payment status, and pay-cycle net results
@@ -168,7 +168,7 @@ The exported file includes:
 
 ```json
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "metadata": {
     "lastExternalBackupAt": "2026-07-23T08:00:00.000Z",
     "backupWindowStartedAt": "2026-07-23T08:00:00.000Z"
@@ -194,9 +194,10 @@ existing overdue behavior is preserved.
 
 A transfer is one transaction with `accountId` as its source and `toAccountId` as its destination.
 `transferNature` records whether it moved into savings, out of savings, or between other accounts.
-An optional `goalId` and signed `goalContribution` link the movement to a savings goal. Transfers
-affect both account balances but are deliberately excluded from income, expense, and net-spending
-totals.
+An optional `goalId` and signed `goalContribution` link a transfer or a direct income deposit to a
+savings goal. Transfers affect both account balances but are deliberately excluded from income,
+expense, and net-spending totals. Direct deposits retain their normal income treatment while also
+advancing the selected goal, including when an archived income transaction is corrected later.
 
 A balance check is stored as a temporary adjustment. Resolving it removes the correction from the
 calculated balance after the missing transaction has been recorded. Re-entering the same reported

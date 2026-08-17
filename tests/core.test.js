@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const core = require("../app.js");
 
 const state = core.initialState();
-assert.equal(state.metadata.appVersion, "0.9.6");
+assert.equal(state.metadata.appVersion, "0.9.7");
 assert.equal(
   state.settings.checkForUpdates,
   true,
@@ -752,6 +752,85 @@ assert.equal(
   -30,
   "a linked transfer out of the goal account should reduce progress",
 );
+assert.equal(
+  core.goalTransferEffect({
+    type: "income",
+    amount: 12.5,
+    accountId: "acct_savings",
+    goalId: "goal_holiday",
+  }),
+  12.5,
+  "income deposited directly into a goal account should be valid positive progress",
+);
+assert.equal(
+  core.goalTransferEffect({
+    type: "income",
+    amount: 12.5,
+    accountId: "acct_everyday",
+    goalId: "goal_holiday",
+  }),
+  0,
+  "income deposited into another account must not silently advance the goal",
+);
+assert.equal(
+  core.validateGoalAssignment({
+    type: "income",
+    amount: 12.5,
+    accountId: "acct_savings",
+    goalId: "goal_holiday",
+  }),
+  "",
+  "direct income should be assignable when it lands in the goal's associated account",
+);
+assert.match(
+  core.validateGoalAssignment({
+    type: "income",
+    amount: 12.5,
+    accountId: "acct_everyday",
+    goalId: "goal_holiday",
+  }),
+  /associated account/,
+  "a mismatched direct-income goal assignment should be rejected rather than silently ignored",
+);
+
+const archivedInterestIncome = {
+  id: "archived_interest_income",
+  periodId: period.id,
+  date: "2026-03-24",
+  type: "income",
+  description: "Savings interest",
+  amount: 12.5,
+  accountId: "acct_savings",
+  goalId: "goal_holiday",
+  goalContribution: 12.5,
+  createdAt: "2026-03-24T00:00:00.000Z",
+};
+core.applyGoalTransferChange(null, archivedInterestIncome);
+core.getStateForTest().transactions.push(archivedInterestIncome);
+assert.equal(
+  core.getStateForTest().goals[0].currentAmount,
+  112.5,
+  "linking archived interest income should carry its value into the current goal balance",
+);
+assert.equal(
+  core.goalTransferNet(core.getStateForTest().goals[0], period),
+  12.5,
+  "direct interest income should appear in the goal's cycle movement history",
+);
+assert.equal(
+  core.goalProgressDate(
+    core.getStateForTest().goals[0],
+    { endDate: "2026-03-25" },
+    "2026-03-23",
+  ),
+  "2026-03-24",
+  "archived direct income should place the goal chart point on its transaction date",
+);
+core.getStateForTest().transactions = core
+  .getStateForTest()
+  .transactions.filter((transaction) => transaction.id !== archivedInterestIncome.id);
+core.applyGoalTransferChange(archivedInterestIncome, null);
+assert.equal(core.getStateForTest().goals[0].currentAmount, 100);
 
 const originalContribution = {
   type: "transfer",
@@ -1614,7 +1693,7 @@ delete legacyState.metadata.lastExternalBackupAt;
 delete legacyState.metadata.backupWindowStartedAt;
 legacyState.backups = [{ id: "browser_only_backup" }];
 const migratedState = core.normalizeState(legacyState);
-assert.equal(migratedState.schemaVersion, 5);
+assert.equal(migratedState.schemaVersion, 6);
 assert.equal(
   migratedState.metadata.backupWindowStartedAt,
   legacyState.metadata.createdAt,

@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const APP_VERSION = "0.9.7";
+  const APP_VERSION = "0.9.8";
   const SCHEMA_VERSION = 6;
   const STORAGE_KEY = "canopy-budget-data-v1";
   const UNCATEGORISED_CATEGORY_ID = "cat_uncategorised";
@@ -375,6 +375,7 @@
   let updateCheckResult = "";
   let calendarWeekStarts = [];
   let calendarReady = false;
+  let calendarDataDirty = true;
   let calendarScrollFrame = null;
   let calendarProgressCache = new Map();
   let calendarTransactionsByDate = new Map();
@@ -1737,6 +1738,7 @@
   }
 
   function renderAll() {
+    calendarDataDirty = true;
     applyTheme(state.settings.theme);
     applySidebarState();
     renderPeriodHeader();
@@ -2323,6 +2325,7 @@
       if (!calendarTransactionsByDate.has(date)) calendarTransactionsByDate.set(date, []);
       calendarTransactionsByDate.get(date).push(transaction);
     });
+    calendarDataDirty = false;
   }
 
   function calendarPlannedEntries(period) {
@@ -2724,7 +2727,7 @@
     const scroll = $("#calendar-scroll");
     if (!scroll) return;
     if (calendarReady && !force) {
-      if (refresh) renderCalendarRows();
+      if (refresh || calendarDataDirty) renderCalendarRows();
       else updateCalendarVisibleRange();
       return;
     }
